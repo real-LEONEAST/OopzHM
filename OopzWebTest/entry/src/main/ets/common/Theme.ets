@@ -27,6 +27,8 @@ export interface ThemePalette {
   warnSoft: string;
   glass: string;
   glassStrong: string;
+  chromeTint: string;
+  chromeHighlight: string;
   glowTop: string;
   glowBottom: string;
   scrimStart: string;
@@ -62,6 +64,8 @@ export const DARK_THEME: ThemePalette = {
   warnSoft: '#3F3428',
   glass: '#D0222629',
   glassStrong: '#EB222629',
+  chromeTint: '#D82B3B36',
+  chromeHighlight: '#38BFEEE0',
   glowTop: '#22A5E4D0',
   glowBottom: '#12D8BBA0',
   scrimStart: '#EB181B1E',
@@ -97,6 +101,8 @@ export const LIGHT_THEME: ThemePalette = {
   warnSoft: '#F5EADB',
   glass: '#DEF9F8F4',
   glassStrong: '#F0FCFBF8',
+  chromeTint: '#EAF1FAF7',
+  chromeHighlight: '#DEFFFFFF',
   glowTop: '#188AC8B5',
   glowBottom: '#18DFC1A5',
   scrimStart: '#CC0F172A',
@@ -162,8 +168,8 @@ export function createImmersiveMaterial(thickness: number, isDark: boolean, inte
     }
     const mat = new uiMaterial.ImmersiveMaterial({
       style: style,
-      materialColor: materialColor,
-      applyShadow: true,
+      materialColor: materialColor ?? (isDark ? '#80233432' : '#88EBF7F3'),
+      applyShadow: interactive,
       interactive: interactive,
       lightEffect: {
         color: isDark ? '#42A5E4D0' : '#62FFFFFF'
@@ -192,8 +198,21 @@ export class ImmersiveChrome implements AttributeModifier<CommonAttribute> {
   }
 
   applyNormalAttribute(instance: CommonAttribute): void {
-    if (!this.enabled) return;
-    const material = createImmersiveMaterial(this.thickness, this.isDark, this.interactive);
+    const theme = getTheme(this.isDark);
+    const material = this.enabled ? createImmersiveMaterial(this.thickness, this.isDark, this.interactive) : undefined;
+    if (material === undefined && deviceInfo.apiAvailable('26.0.0')) {
+      instance.systemMaterial(uiMaterial.Material.empty);
+    }
+
+    // Custom bars also need a visible treatment on surfaces where ArkUI cannot render a system material.
+    instance.backgroundColor(this.enabled ? theme.chromeTint : theme.surfaceSolid);
+    instance.borderColor(this.enabled ? theme.specularBorder : theme.borderSubtle);
+    instance.backgroundEffect({ radius: this.enabled ? 12 : 0, color: Color.Transparent });
+    instance.linearGradient({
+      direction: GradientDirection.Bottom,
+      colors: [[this.enabled ? theme.chromeHighlight : Color.Transparent, 0],
+        [Color.Transparent, 0.56], [Color.Transparent, 1]]
+    });
     if (material !== undefined) {
       instance.systemMaterial(material);
     }
@@ -204,6 +223,7 @@ export class AppSpacing {
   static readonly page: number = 20;
   static readonly card: number = 16;
   static readonly gap: number = 14;
+  static readonly radiusLg: number = 24;
   static readonly radius: number = 16;
   static readonly radiusSm: number = 12;
   static readonly navHeight: number = 56;

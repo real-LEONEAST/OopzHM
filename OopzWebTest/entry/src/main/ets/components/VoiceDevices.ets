@@ -1,27 +1,28 @@
-import { AVCastPicker, AVCastPickerState } from '@kit.AVSessionKit';
-import { getTheme } from '../common/Theme';
+import { AVCastPicker, AVCastPickerState, AVCastPickerStyle } from '@kit.AVSessionKit';
+import { AppSpacing, getTheme } from '../common/Theme';
 
 @Component
 export struct VoiceOutputPicker {
   @Prop label: string = '';
   @Prop isDark: boolean = true;
   @Prop compact: boolean = false;
+  @Prop split: boolean = false;
+  @Prop heightVp: number = 42;
   @Prop sessionType: string = '';
+  onOpenChange: (open: boolean) => void = () => {};
   onRefresh: () => void = () => {};
 
   @Builder
-  private iconAndLabel() {
+  private pickerGlyph() {
     Row({ space: 5 }) {
-      SymbolGlyph($r('sys.symbol.speaker')).fontSize(18).fontColor([getTheme(this.isDark).text])
-      if (!this.compact) {
-        Text(this.label || '声音输出')
-          .fontSize(12)
-          .fontColor(getTheme(this.isDark).text)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .constraintSize({ maxWidth: 92 })
+      SymbolGlyph(this.split ? $r('sys.symbol.chevron_down') : $r('sys.symbol.speaker'))
+        .fontSize(this.split ? 12 : 18).fontColor([getTheme(this.isDark).textSecondary])
+      if (!this.split && !this.compact) {
+        Text(this.label || '声音输出').fontSize(12).fontColor(getTheme(this.isDark).text)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).constraintSize({ maxWidth: 90 })
       }
     }
+    .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.Center)
   }
@@ -31,24 +32,26 @@ export struct VoiceOutputPicker {
       if (this.sessionType.length > 0) {
         AVCastPicker({
           sessionType: this.sessionType,
-          customPicker: () => this.iconAndLabel(),
+          pickerStyle: AVCastPickerStyle.STYLE_MENU,
+          customPicker: () => this.pickerGlyph(),
           onStateChange: (state: AVCastPickerState) => {
+            this.onOpenChange(state === AVCastPickerState.STATE_APPEARING);
             if (state === AVCastPickerState.STATE_DISAPPEARING) this.onRefresh();
           }
         })
-          .width(this.compact ? 44 : 126)
+          .width(this.split ? 39 : (this.compact ? 44 : 126))
           .height('100%')
-          .accessibilityText(this.label ? `声音输出，${this.label}` : '选择声音输出')
+          .accessibilityText(this.label ? `选择声音输出，当前${this.label}` : '选择声音输出')
       } else {
-        this.iconAndLabel()
+        this.pickerGlyph()
       }
     }
-    .width(this.compact ? 44 : 126)
-    .height(44)
+    .width(this.split ? 39 : (this.compact ? 44 : 126))
+    .height(this.heightVp)
     .justifyContent(FlexAlign.Center)
-    .borderRadius(14)
-    .backgroundColor(getTheme(this.isDark).surfaceAlt)
-    .opacity(this.sessionType.length > 0 ? 1 : 0.62)
+    .borderRadius(AppSpacing.radius)
+    .backgroundColor(this.split ? Color.Transparent : getTheme(this.isDark).surfaceAlt)
+    .opacity(this.sessionType.length > 0 ? 1 : 0.42)
   }
 }
 
@@ -58,6 +61,10 @@ export struct VoiceMicStatus {
   @Prop capturing: boolean = false;
   @Prop input: string = '';
   @Prop output: string = '';
+  @Prop playbackMuted: boolean = false;
+  @Prop volumeType: string = '';
+  @Prop rates: string = '';
+  @Prop task: string = '';
   @Prop isDark: boolean = true;
 
   build() {
@@ -79,16 +86,23 @@ export struct VoiceMicStatus {
         .fontColor(getTheme(this.isDark).textMuted)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      Text(`输出 · ${this.output || '由系统选择'}`)
+      Text(`输出 · ${this.playbackMuted ? '已静音' : (this.output || '由系统选择')}${this.volumeType ? ' · ' + this.volumeType : ''}`)
         .width('100%')
         .fontSize(12)
         .fontColor(getTheme(this.isDark).textMuted)
         .maxLines(2)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (this.rates.length > 0) {
+        Text(this.rates).width('100%').fontSize(11).fontColor(getTheme(this.isDark).textMuted)
+      }
+      if (this.task.length > 0) {
+        Text(this.task).width('100%').fontSize(11).fontColor(getTheme(this.isDark).textMuted)
+          .maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
     }
     .width('100%')
     .padding({ left: 14, right: 14, top: 10, bottom: 10 })
-    .borderRadius(14)
+    .borderRadius(AppSpacing.radius)
     .backgroundColor(getTheme(this.isDark).surface)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .alignItems(HorizontalAlign.Start)

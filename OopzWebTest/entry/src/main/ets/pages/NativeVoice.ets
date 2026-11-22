@@ -17,9 +17,10 @@ import { OOPZ_TEST_TOKEN, OOPZ_TEST_APPID } from '../oopz/OopzKeyMaterial';
 import { AppStore, DEFAULT_MIC_GAIN, MAX_MEMBER_GAIN, MAX_MIC_GAIN } from '../store/AppStore';
 import { AccountPanel } from '../components/AccountPanel';
 import { BottomBar } from '../components/BottomBar';
+import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
 import { VoiceMicStatus, VoiceOutputPicker } from '../components/VoiceDevices';
-import { getTheme, ImmersiveChrome, supportsImmersiveLight } from '../common/Theme';
+import { AppSpacing, getTheme, ImmersiveChrome } from '../common/Theme';
 import { PcTrayManager, TrayCallAction } from '../desktop/PcTrayManager';
 import { VoiceBackgroundTest, VoiceTaskState } from '../voice/VoiceBackgroundTest';
 import { VoiceAudioRoute, voiceDeviceName, VoiceRouteStatus, volumeLabel } from '../voice/VoiceAudioRoute';
@@ -35,7 +36,18 @@ const PC_DOMAIN_RAIL_WIDTH = 64;
 const PC_CHANNEL_PANE_WIDTH = 224;
 const PC_CALL_BAR_COMPACT_VP = 506;
 const PC_CAPTION_HEIGHT = 40;
-const SPEAK_HOLD_MS = 700;
+const SPEAK_HOLD_MS = 440;
+const REMOTE_SPEECH_MIN_VOLUME = 24;
+const REMOTE_SPEECH_SAMPLE_WINDOW_MS = 360;
+const INITIAL_PEER_SYNC_MS = 1600;
+
+type MobilePane = 'channels' | 'home' | 'room' | 'account';
+
+interface ChannelMemberPreview {
+  uid: string;
+  name: string;
+  avatar: string;
+}
 
 enum CallState {
   IDLE,
@@ -54,7 +66,7 @@ interface ChannelCard {
   maxMember: number;
   voiceQuality: string;
   onlineCount: number;
-  previewText: string;
+  members: ChannelMemberPreview[];
   isSelected: boolean;
   inCall: boolean;
   isDark: boolean;
@@ -138,19 +150,6 @@ struct MemberRow {
   onSelectVolume: (pid: number, vol: number) => void = () => {};
   onToggleLocalMute: (pid: number) => void = () => {};
 
-  private stateText(): string {
-    if (this.item.speaking) {
-      return '正在说话';
-    }
-    if (this.item.muted) {
-      return '已闭麦';
-    }
-    if (this.item.screenSharing) {
-      return '共享屏幕中';
-    }
-    return this.item.isSelf ? '麦克风已开' : '在频道';
-  }
-
   build() {
     Column({ space: 8 }) {
       Row({ space: 10 }) {
@@ -221,18 +220,22 @@ struct MemberRow {
         .alignItems(HorizontalAlign.Start)
 
         Row({ space: 5 }) {
-          if (this.item.speaking) {
+          if (this.item.muted) {
+            SymbolGlyph($r('sys.symbol.mic_slash'))
+              .fontSize(16)
+              .fontColor([getTheme(this.isDark).textMuted])
+              .accessibilityText('已闭麦')
+          } else if (this.item.speaking) {
             Row()
               .width(7)
               .height(7)
               .borderRadius(4)
               .backgroundColor(getTheme(this.isDark).speaking)
+            Text('正在说话').fontSize(12).fontWeight(FontWeight.Medium)
+              .fontColor(getTheme(this.isDark).speaking)
+          } else if (this.item.screenSharing) {
+            Text('共享屏幕中').fontSize(12).fontColor(getTheme(this.isDark).textMuted)
           }
-          Text(this.stateText())
-            .fontSize(12)
-            .fontWeight(this.item.speaking ? FontWeight.Medium : FontWeight.Normal)
-            .fontColor(this.item.speaking ? getTheme(this.isDark).speaking :
-              (this.item.muted ? getTheme(this.isDark).warn : getTheme(this.isDark).textMuted))
         }
       }
       .width('100%')
@@ -354,7 +357,7 @@ struct ChatMessageRow {
 @Component
 struct NativeVoice {
   @State private pageWidth: number = 390;
-  @State private mobilePane: string = 'areas'; // 'areas' | 'channels' | 'room'
+  @State private mobilePane: MobilePane = 'channels';
   @State private desktopPane: 'room' | 'account' | 'settings' = 'room';
   @State private captionMerged: boolean = false;
   @State private captionInset: number = 0;
@@ -367,8 +370,10 @@ struct NativeVoice {
   @State private selectedChannelId: string = '';
   @State private selectedAreaObj?: OopzArea = undefined;
   @State private selectedChannelObj?: OopzVoiceChannel = undefined;
-  @State private textChannels: ChannelCard[] = [];
-  @State private voiceChannels: ChannelCard[] = [];
+  @State private channelCards: ChannelCard[] = [];
+  @State private expandedChannels: string[] = [];
+  @State private emojiPickerOpen: boolean = false;
+  @State private mediaInputMenuOpen: boolean = false;
   @State private roomMembers: RoomMemberModel[] = [];
   @State private chatMessages: ChatMessageItem[] = [];
   @State private chatInput: string = '';
@@ -385,6 +390,7 @@ struct NativeVoice {
   @State private peers: number = 0;
   @State private capturing: boolean = false;
   @State private muted: boolean = false;
+  @State private speakerMuted: boolean = false;
   @State private rates: string = '';
   @State private routes: VoiceRouteStatus = new VoiceRouteStatus();
   @State private showMicGain: boolean = false;
@@ -392,15 +398,19 @@ struct NativeVoice {
   @StorageProp('oopzIsDark') private isDark: boolean = true;
   @StorageProp('oopzIsPc') private isPc: boolean = false;
   @StorageProp('oopzImmersiveLight') private immersiveLight: boolean = true;
-  @StorageProp('oopzWsConnected') private wsConnected: boolean = false;
   @StorageProp('oopzMicGain') @Watch('applyMicGain') private micGain: number = DEFAULT_MIC_GAIN;
   @StorageProp('oopzAppForeground') @Watch('updateForeground') private foreground: boolean = false;
   @StorageProp('oopzSelfName') private selfName: string = '';
   @StorageProp('oopzSelfAvatar') private selfAvatar: string = '';
   @StorageProp('oopzCallChannelName') private activeCallName: string = '';
+  @StorageProp('oopzTaskStatus') private taskStatus: string = '';
+  @StorageProp('oopzMicCue') private micCue: boolean = false;
 
   private readonly store: AppStore = AppStore.get();
   private readonly chatScroller: Scroller = new Scroller();
+  private readonly channelScroller: Scroller = new Scroller();
+  private readonly channelOffsets: Map<string, number> = new Map<string, number>();
+  private paneBeforeAccount: MobilePane = 'channels';
   private rtc?: NativeRtcCall;
   private captionWindow?: window.Window;
   private originalCaptionHeight: number = PC_CAPTION_HEIGHT;
@@ -416,14 +426,15 @@ struct NativeVoice {
   private speakDecayTimer: number = -1;
   private hiddenAt: number = 0;
   private lastStatsAt: number = 0;
-  private lastVolumeLogAt: number = 0;
+  private peerCuesAfter: number = Number.POSITIVE_INFINITY;
   private lastPresenceChannelId: string = '';
   private lastPresenceFetchAt: number = 0;
   private joinGeneration: number = 0;
 
   private readonly rtcPeerPids: Set<number> = new Set<number>();
   private readonly remoteMutedPids: Set<number> = new Set<number>();
-  private readonly speakingHoldUntil: Map<string, number> = new Map<string, number>();
+  private readonly speakingHoldUntil: Map<number, number> = new Map<number, number>();
+  private readonly lastRemoteSpeechSample: Map<number, number> = new Map<number, number>();
   private readonly userVolumeMap: Map<number, number> = new Map<number, number>();
   private readonly userLocalMuteMap: Map<number, boolean> = new Map<number, boolean>();
   private readonly expandedUids: Set<string> = new Set<string>();
@@ -488,6 +499,10 @@ struct NativeVoice {
   aboutToDisappear(): void {
     this.restoreDesktopCaption();
     this.activePage = false;
+    this.store.setGripInteractionActive('voice-input-menu', false);
+    this.store.setGripInteractionActive('voice-input-picker', false);
+    this.store.setGripInteractionActive('voice-output-picker', false);
+    this.store.setGripInteractionActive('voice-emoji', false);
     this.store.setPresenceListener(undefined);
     this.store.setChatListener(undefined);
     PcTrayManager.get().setCallActionHandler(undefined);
@@ -516,6 +531,52 @@ struct NativeVoice {
     if (AppStorage.get<boolean>('oopzRequestReturnRoom') === true) {
       AppStorage.setOrCreate<boolean>('oopzRequestReturnRoom', false);
       this.jumpToActiveRoom();
+    }
+  }
+
+  onBackPress(): boolean {
+    if (this.backToParent()) return true;
+    if (!this.isInCall()) return false;
+    this.getAbilityContext()?.moveAbilityToBackground().catch(() => {});
+    return true;
+  }
+
+  private backToParent(): boolean {
+    if (this.emojiPickerOpen) {
+      this.emojiPickerOpen = false;
+      return true;
+    }
+    if (this.mediaInputMenuOpen) {
+      this.setMediaInputMenuOpen(false);
+      return true;
+    }
+    if (this.showMicGain) {
+      this.showMicGain = false;
+      return true;
+    }
+    if (this.isPc && this.desktopPane !== 'room') {
+      this.desktopPane = 'room';
+      return true;
+    }
+    if (this.mobilePane === 'account') {
+      this.mobilePane = this.paneBeforeAccount;
+      return true;
+    }
+    if (this.mobilePane !== 'channels' && (!this.isPc || !this.isWide())) {
+      this.mobilePane = 'channels';
+      return true;
+    }
+    return false;
+  }
+
+  private switchMobileTab(tab: string): void {
+    if (tab === 'account' && this.mobilePane !== 'account') {
+      this.paneBeforeAccount = this.mobilePane;
+      this.emojiPickerOpen = false;
+      this.mobilePane = 'account';
+    } else if (tab === 'voice') {
+      this.emojiPickerOpen = false;
+      this.mobilePane = 'channels';
     }
   }
 
@@ -610,10 +671,6 @@ struct NativeVoice {
     return this.pageWidth - railWidth - channelWidth < PC_CALL_BAR_COMPACT_VP;
   }
 
-  private useImmersiveLight(): boolean {
-    return this.immersiveLight && supportsImmersiveLight();
-  }
-
   private callStateText(): string {
     switch (this.state) {
       case CallState.JOINING: return '正在加入';
@@ -626,8 +683,8 @@ struct NativeVoice {
 
   private desktopChannelItems(): ChannelListItem[] {
     const groups: Map<string, ChannelCard[]> = new Map<string, ChannelCard[]>();
-    for (const channel of this.voiceChannels.concat(this.textChannels)) {
-      const group = channel.group || (channel.isText ? '文字频道' : '语音频道');
+    for (const channel of this.channelCards) {
+      const group = channel.group || '未分类';
       const existing = groups.get(group);
       if (existing !== undefined) {
         existing.push(channel);
@@ -640,7 +697,7 @@ struct NativeVoice {
       items.push({ key: `group-${title}`, label: title });
       for (const channel of channels) {
         items.push({
-          key: `channel-${channel.channelId}-${channel.name}-${channel.onlineCount}-${channel.isSelected}-${channel.inCall}-${this.isDark}`,
+          key: `channel-${channel.channelId}-${channel.name}-${channel.onlineCount}-${channel.isSelected}-${channel.inCall}-${this.isDark}-${channel.members.map((member: ChannelMemberPreview) => member.uid + member.name + member.avatar).join('|')}`,
           label: channel.name,
           channel: channel
         });
@@ -657,9 +714,8 @@ struct NativeVoice {
     if (!this.isInCall() || (this.isPc && this.desktopPane !== 'room')) {
       return false;
     }
-    return this.callAreaId === this.selectedAreaId &&
-      this.callChannelId === this.selectedChannelId &&
-      (this.isWide() || this.mobilePane === 'room');
+    return this.callAreaId === this.selectedAreaId && this.callChannelId === this.selectedChannelId &&
+      (this.mobilePane === 'room' || (this.isPc && this.isWide()));
   }
 
   private selectedArea(): OopzArea | undefined {
@@ -667,7 +723,8 @@ struct NativeVoice {
   }
 
   private selectedChannel(): OopzVoiceChannel | undefined {
-    return this.store.channels.find((c: OopzVoiceChannel): boolean => c.channelId === this.selectedChannelId);
+    return this.store.channelsByArea.get(this.selectedAreaId)?.find((c: OopzVoiceChannel): boolean =>
+      c.channelId === this.selectedChannelId);
   }
 
   private async bootstrap(): Promise<void> {
@@ -708,7 +765,7 @@ struct NativeVoice {
       const cred = await this.store.restore();
       if (cred === undefined) return;
       this.signedIn = true;
-      hilog.info(0x0, TAG, 'Restored Oopz session uid=%{public}s', cred.personUid);
+      hilog.info(0x0, TAG, 'Restored Oopz session');
       await this.store.loadSelfProfile();
       await this.loadAreas();
     } catch {
@@ -799,8 +856,7 @@ struct NativeVoice {
         this.selectedChannelId = '';
         this.selectedAreaObj = undefined;
         this.selectedChannelObj = undefined;
-        this.textChannels = [];
-        this.voiceChannels = [];
+        this.channelCards = [];
         this.roomMembers = [];
         this.chatMessages = [];
         this.notice = '该账号没有已加入的域';
@@ -826,36 +882,39 @@ struct NativeVoice {
 
   private async selectArea(areaId: string, advanceMobile: boolean = true): Promise<void> {
     if (areaId.length === 0) return;
+    this.rememberChannelPosition();
+    this.emojiPickerOpen = false;
+    if (advanceMobile) this.mobilePane = 'channels';
     this.selectedAreaId = areaId;
     this.readingRooms = true;
+    this.syncViewModels();
     try {
       const channels = await this.store.loadChannels(areaId);
-      hilog.info(0x0, TAG, 'Oopz channels area=%{public}s count=%{public}d', areaId, channels.length);
+      if (this.selectedAreaId !== areaId) return;
+      hilog.info(0x0, TAG, 'Oopz channels count=%{public}d', channels.length);
       if (!channels.some((c: OopzVoiceChannel): boolean => c.channelId === this.selectedChannelId)) {
         this.selectedChannelId = this.pickDefaultChannel(channels);
       }
       this.lastPresenceChannelId = this.selectedChannelId;
       this.lastPresenceFetchAt = Date.now();
       this.notice = channels.length > 0 ? '' : '该域暂无可用频道';
-      if (advanceMobile && !this.isWide()) {
-        this.mobilePane = 'channels';
-      }
       this.syncViewModels();
-      if (this.selectedChannelObj?.type === 'TEXT') {
+      this.restoreChannelPosition();
+      if (this.selectedChannelObj?.type === 'TEXT' && this.isPc && this.isWide()) {
         await this.loadSelectedChat();
       }
     } catch (error) {
-      this.notice = (error as Error).message;
+      if (this.selectedAreaId === areaId) this.notice = (error as Error).message;
     } finally {
-      this.readingRooms = false;
+      if (this.selectedAreaId === areaId) this.readingRooms = false;
     }
   }
 
   private selectChannel(channelId: string): void {
+    this.rememberChannelPosition();
+    this.emojiPickerOpen = false;
     this.selectedChannelId = channelId;
-    if (!this.isWide()) {
-      this.mobilePane = 'room';
-    }
+    this.mobilePane = 'room';
     this.syncViewModels();
     if (this.selectedChannelObj === undefined) {
       return;
@@ -980,28 +1039,29 @@ struct NativeVoice {
 
   private syncViewModels(): void {
     this.selectedAreaObj = this.areas.find((a: OopzArea): boolean => a.areaId === this.selectedAreaId);
-    const channels = this.store.channelsByArea.get(this.selectedAreaId) ?? this.store.channels;
+    const channels = this.store.channelsByArea.get(this.selectedAreaId) ?? [];
     this.selectedChannelObj = channels.find((c: OopzVoiceChannel): boolean => c.channelId === this.selectedChannelId);
 
-    const textList: ChannelCard[] = [];
-    const voiceList: ChannelCard[] = [];
+    const cards: ChannelCard[] = [];
     const darkFlag = this.isDark;
     for (const ch of channels) {
       const isText = ch.type === 'TEXT';
-      const inThisRoom = !isText && this.state !== CallState.IDLE && this.callChannelId === ch.channelId;
+      const inThisRoom = !isText && this.isInCall() && this.callAreaId === this.selectedAreaId &&
+        this.callChannelId === ch.channelId;
       let count = 0;
-      let previewText = isText ? (ch.group.length > 0 ? ch.group : '文字消息') : '暂无成员';
+      const previews: ChannelMemberPreview[] = [];
       if (!isText) {
         const members = this.store.membersByChannel.get(ch.channelId) ?? [];
-        const names: string[] = [];
         for (const m of members) {
           const p = this.store.getPersonByUid(m.uid);
-          names.push(p !== undefined ? p.name : m.uid.slice(0, 6));
+          previews.push({ uid: m.uid, name: p?.name || '成员', avatar: p?.avatar ?? '' });
+        }
+        if (inThisRoom && this.store.selfProfile !== undefined &&
+          !previews.some((member: ChannelMemberPreview) => member.uid === this.store.selfProfile?.uid)) {
+          const self = this.store.selfProfile;
+          previews.push({ uid: self.uid, name: self.name, avatar: self.avatar });
         }
         count = inThisRoom ? Math.max(members.length, this.peers + 1) : members.length;
-        previewText = names.length > 0
-          ? names.slice(0, 3).join('、') + (names.length > 3 ? ` 等 ${names.length} 人` : '')
-          : (inThisRoom ? '正在通话中' : '暂无成员');
       }
       const card: ChannelCard = {
         channelId: ch.channelId,
@@ -1012,19 +1072,14 @@ struct NativeVoice {
         maxMember: ch.maxMember,
         voiceQuality: ch.voiceQuality,
         onlineCount: count,
-        previewText: previewText,
+        members: previews,
         isSelected: ch.channelId === this.selectedChannelId,
         inCall: inThisRoom,
         isDark: darkFlag
       };
-      if (isText) {
-        textList.push(card);
-      } else {
-        voiceList.push(card);
-      }
+      cards.push(card);
     }
-    this.textChannels = textList;
-    this.voiceChannels = voiceList;
+    this.channelCards = cards;
     this.syncRoomMembers();
   }
 
@@ -1036,7 +1091,7 @@ struct NativeVoice {
     }
     const selfUid = this.store.session.getCred()?.personUid ?? '';
     const rawMembers: OopzChannelMember[] = (this.store.membersByChannel.get(chId) ?? []).slice();
-    const inThisCall = this.state !== CallState.IDLE && this.callChannelId === chId;
+    const inThisCall = this.isInCall() && this.callAreaId === this.selectedAreaId && this.callChannelId === chId;
 
     if (inThisCall && selfUid.length > 0 && !rawMembers.some((m: OopzChannelMember): boolean => m.uid === selfUid)) {
       rawMembers.push({
@@ -1054,9 +1109,9 @@ struct NativeVoice {
         (m.uid === selfUid ? this.store.selfProfile : undefined);
       const pid = person !== undefined ? person.pid : 0;
       const isSelf = m.uid === selfUid;
-      const speakUntil = this.speakingHoldUntil.get(m.uid) ?? 0;
-      const speaking = inThisCall && speakUntil > now && !(isSelf && this.muted);
       const muted = inThisCall && (isSelf ? this.muted : (pid > 0 && this.remoteMutedPids.has(pid)));
+      const speakUntil = this.speakingHoldUntil.get(isSelf ? 0 : pid) ?? 0;
+      const speaking = inThisCall && (isSelf || pid > 0) && !muted && speakUntil > now;
       const vol = pid > 0 ? (this.userVolumeMap.get(pid) ?? 100) : 100;
       const localMuted = pid > 0 && (this.userLocalMuteMap.get(pid) ?? false);
       const expanded = this.expandedUids.has(m.uid);
@@ -1079,9 +1134,8 @@ struct NativeVoice {
           return;
         }
         seenUids.add(synthUid);
-        const speakUntil = this.speakingHoldUntil.get(synthUid) ?? 0;
-        const speaking = speakUntil > now;
         const muted = this.remoteMutedPids.has(pid);
+        const speaking = !muted && (this.speakingHoldUntil.get(pid) ?? 0) > now;
         const vol = this.userVolumeMap.get(pid) ?? 100;
         const localMuted = this.userLocalMuteMap.get(pid) ?? false;
         const expanded = this.expandedUids.has(synthUid);
@@ -1173,6 +1227,8 @@ struct NativeVoice {
       }
     }
     if (generation !== this.joinGeneration || this.hiddenAt !== 0 || this.state !== CallState.CONNECTED) return;
+    await this.voiceRoute.activateMixing();
+    if (generation !== this.joinGeneration || this.hiddenAt !== 0 || this.state !== CallState.CONNECTED) return;
     if (!this.muted && !this.capturing) this.rtc?.setMicrophone(true);
     this.applyMicGain();
     this.startSystemCallSession();
@@ -1202,10 +1258,15 @@ struct NativeVoice {
   }
 
   private startSystemCallSession(): void {
+    const area = this.areas.find((candidate: OopzArea) => candidate.areaId === this.callAreaId);
+    const channel = this.store.channelsByArea.get(this.callAreaId)?.find((candidate: OopzVoiceChannel) =>
+      candidate.channelId === this.callChannelId);
     this.voiceRoute.activate(this.muted, () => {
       if (this.isInCall()) this.leave();
     }, () => {
       if (this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING) this.toggleMicrophone();
+    }, {
+      title: channel?.name ?? '语音频道', domain: area?.name ?? '', avatar: area?.avatar ?? ''
     });
   }
 
@@ -1265,6 +1326,8 @@ struct NativeVoice {
       this.rtcPeerPids.clear();
       this.remoteMutedPids.clear();
       this.speakingHoldUntil.clear();
+      this.lastRemoteSpeechSample.clear();
+      this.peerCuesAfter = Number.POSITIVE_INFINITY;
       this.userVolumeMap.clear();
       this.userLocalMuteMap.clear();
       this.expandedUids.clear();
@@ -1289,8 +1352,10 @@ struct NativeVoice {
       this.syncCallStore();
       this.syncViewModels();
       this.notice = '正在连接语音服务';
-      this.joinTimer = setTimeout(() => { this.leave('进房超时，请检查网络连接'); }, 20000);
       this.voiceRoute.begin(context, (status: VoiceRouteStatus) => { this.updateVoiceRoute(status); });
+      this.joinTimer = setTimeout(() => { this.leave('进房超时，请检查网络连接'); }, 20000);
+      await this.voiceRoute.activateMixing();
+      if (!this.activePage || generation !== this.joinGeneration) return;
       rtc.start(context, room, this.callEvents(), true, this.micGain);
     } catch (error) {
       if (generation !== this.joinGeneration) {
@@ -1331,7 +1396,7 @@ struct NativeVoice {
     this.speakDecayTimer = setInterval(() => {
       const now = Date.now();
       let hasActive = false;
-      this.speakingHoldUntil.forEach((until: number, key: string) => {
+      this.speakingHoldUntil.forEach((until: number, key: number) => {
         if (until <= now) {
           this.speakingHoldUntil.delete(key);
         } else {
@@ -1358,11 +1423,13 @@ struct NativeVoice {
         const reconnecting = this.state === CallState.RECONNECTING;
         clearTimeout(this.joinTimer);
         this.state = CallState.CONNECTED;
+        this.peerCuesAfter = Date.now() + INITIAL_PEER_SYNC_MS;
         this.notice = '';
         hilog.info(0x0, TAG, 'Native RTC joined');
         if (reconnecting) {
           this.taskAttempted = false;
           if (this.muted) this.rtc?.setMicrophone(false);
+          if (this.speakerMuted) this.rtc?.setSpeakerMuted(true);
         }
         this.applyMicGain();
         this.startSystemCallSession();
@@ -1382,6 +1449,10 @@ struct NativeVoice {
       },
       reconnecting: () => {
         this.state = CallState.RECONNECTING;
+        this.peerCuesAfter = Number.POSITIVE_INFINITY;
+        this.speakingHoldUntil.clear();
+        this.lastRemoteSpeechSample.clear();
+        this.syncRoomMembers();
         this.notice = '语音正在重新连接';
         hilog.warn(0x0, TAG, 'Native RTC reconnecting');
       },
@@ -1404,7 +1475,7 @@ struct NativeVoice {
         hilog.info(0x0, TAG, 'Native RTC remote peers=%{public}d', count);
       },
       peerJoined: (pid: number) => {
-        hilog.info(0x0, TAG, 'Native RTC peerJoined pid=%{public}d', pid);
+        if (!this.rtcPeerPids.has(pid)) this.playPeerCue(true);
         this.rtcPeerPids.add(pid);
         if (this.store.getPersonByPid(pid) === undefined && this.callAreaId.length > 0) {
           const ch = (this.store.channelsByArea.get(this.callAreaId) ?? [])
@@ -1418,42 +1489,34 @@ struct NativeVoice {
         this.syncRoomMembers();
       },
       peerOffline: (pid: number) => {
-        hilog.info(0x0, TAG, 'Native RTC peerOffline pid=%{public}d', pid);
-        this.rtcPeerPids.delete(pid);
+        if (this.rtcPeerPids.delete(pid)) this.playPeerCue(false);
         this.remoteMutedPids.delete(pid);
+        this.speakingHoldUntil.delete(pid);
+        this.lastRemoteSpeechSample.delete(pid);
         this.syncRoomMembers();
       },
-      volumeIndication: (speakers: AudioVolumeInfo[], totalVolume: number) => {
+      volumeIndication: (speakers: AudioVolumeInfo[], _totalVolume: number) => {
+        if (this.state !== CallState.CONNECTED) return;
         const now = Date.now();
-        const selfUid = this.store.session.getCred()?.personUid ?? '';
-        let anySpoke = false;
+        let changed = false;
         for (const s of speakers) {
-          const active = s.volume > 12 || s.vad === 1;
-          if (!active) continue;
-          if (s.uid === 0) {
-            if (!this.muted && selfUid.length > 0) {
-              this.speakingHoldUntil.set(selfUid, now + SPEAK_HOLD_MS);
-              anySpoke = true;
-            }
-          } else {
-            const person = this.store.getPersonByPid(s.uid);
-            const key = person !== undefined ? person.uid : `pid:${s.uid}`;
-            this.speakingHoldUntil.set(key, now + SPEAK_HOLD_MS);
-            anySpoke = true;
+          // The SDK only reports VAD for the local microphone. Require two above-threshold
+          // remote samples to avoid triggering from silence or a single noise spike.
+          const active = s.uid === 0 ? (!this.muted && s.vad === 1 && s.volume > 0) :
+            this.hasRemoteSpeech(s.uid, s.volume, now);
+          if (active) {
+            changed = changed || (this.speakingHoldUntil.get(s.uid) ?? 0) <= now;
+            this.speakingHoldUntil.set(s.uid, now + SPEAK_HOLD_MS);
           }
         }
-        if (anySpoke) {
-          this.startSpeakDecayTimer();
-          this.syncRoomMembers();
-        }
-        if (now - this.lastVolumeLogAt >= 5000 && speakers.length > 0) {
-          this.lastVolumeLogAt = now;
-          hilog.info(0x0, TAG, 'VolumeIndication total=%{public}d count=%{public}d', totalVolume, speakers.length);
-        }
+        if (this.speakingHoldUntil.size > 0) this.startSpeakDecayTimer();
+        if (changed) this.syncRoomMembers();
       },
       userMuteAudio: (pid: number, muted: boolean) => {
         if (muted) {
           this.remoteMutedPids.add(pid);
+          this.speakingHoldUntil.delete(pid);
+          this.lastRemoteSpeechSample.delete(pid);
         } else {
           this.remoteMutedPids.delete(pid);
         }
@@ -1481,9 +1544,39 @@ struct NativeVoice {
     };
   }
 
+  private hasRemoteSpeech(pid: number, volume: number, now: number): boolean {
+    if (this.remoteMutedPids.has(pid) || volume < REMOTE_SPEECH_MIN_VOLUME) {
+      this.lastRemoteSpeechSample.delete(pid);
+      return false;
+    }
+    const previous = this.lastRemoteSpeechSample.get(pid) ?? 0;
+    this.lastRemoteSpeechSample.set(pid, now);
+    return previous > 0 && now - previous <= REMOTE_SPEECH_SAMPLE_WINDOW_MS;
+  }
+
+  private playPeerCue(joined: boolean): void {
+    if (!this.speakerMuted && this.state === CallState.CONNECTED && Date.now() >= this.peerCuesAfter) {
+      this.rtc?.playRoomCue(joined);
+    }
+  }
+
+  private toggleSpeaker(): void {
+    const next = !this.speakerMuted;
+    if (this.rtc?.setSpeakerMuted(next) === 0) {
+      this.speakerMuted = next;
+    } else {
+      this.notice = '切换扬声器静音失败';
+    }
+  }
+
   private toggleMicrophone(): void {
     if (this.rtc?.setMicrophone(this.muted) === 0) {
       this.muted = !this.muted;
+      if (this.muted) {
+        this.capturing = false;
+        this.speakingHoldUntil.delete(0);
+      }
+      if (this.micCue && !this.speakerMuted) this.rtc?.playRoomCue(!this.muted);
       this.voiceRoute.updateMute(this.muted);
       AppStorage.setOrCreate<string>('oopzCallInput', this.muted ? '已关闭' : this.routes.input);
       if (!this.muted) this.applyMicGain();
@@ -1563,12 +1656,16 @@ struct NativeVoice {
       this.peers = 0;
       this.capturing = false;
       this.muted = false;
+      this.speakerMuted = false;
       this.rates = '';
       this.showMicGain = false;
+      this.setMediaInputMenuOpen(false);
       this.routes = new VoiceRouteStatus();
       this.rtcPeerPids.clear();
       this.remoteMutedPids.clear();
       this.speakingHoldUntil.clear();
+      this.lastRemoteSpeechSample.clear();
+      this.peerCuesAfter = Number.POSITIVE_INFINITY;
       this.userVolumeMap.clear();
       this.userLocalMuteMap.clear();
       this.expandedUids.clear();
@@ -1593,28 +1690,13 @@ struct NativeVoice {
   }
 
   @Builder
-  private desktopChromeHighlight() {
-    Row()
-      .width('100%')
-      .height(1)
-      .linearGradient({
-        direction: GradientDirection.Right,
-        colors: [
-          [getTheme(this.isDark).borderSubtle, 0],
-          [this.useImmersiveLight() ? getTheme(this.isDark).specularBorder : getTheme(this.isDark).borderSubtle, 0.45],
-          [getTheme(this.isDark).borderSubtle, 1]
-        ]
-      })
-      .hitTestBehavior(HitTestMode.None)
-  }
-
-  @Builder
   private desktopMoreMenu() {
     Menu() {
       MenuItem({ content: '刷新域与频道' })
         .enabled(!this.readingRooms)
         .onClick(() => { this.loadAreas(); })
       MenuItem({ content: '打开 Oopz 网页' })
+        .enabled(!this.isInCall())
         .onClick(() => { this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' }).catch(() => {}); })
       MenuItem({ content: '最小化到托盘' })
         .onClick(() => { PcTrayManager.get().minimizeToTray(); })
@@ -1624,9 +1706,8 @@ struct NativeVoice {
   @Builder
   private desktopHeader() {
     Column() {
-      this.desktopChromeHighlight()
       Row({ space: 10 }) {
-        if (!this.isWide() && this.desktopPane === 'room' && this.mobilePane !== 'areas') {
+        if (!this.isWide() && this.desktopPane === 'room' && this.mobilePane === 'room') {
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(16).fontColor([getTheme(this.isDark).text])
           }
@@ -1634,9 +1715,9 @@ struct NativeVoice {
           .height(34)
           .borderRadius(8)
           .backgroundColor(Color.Transparent)
-          .accessibilityText(this.mobilePane === 'room' ? '返回频道列表' : '返回域列表')
+          .accessibilityText('返回频道列表')
           .hoverEffect(HoverEffect.Highlight)
-          .onClick(() => { this.mobilePane = this.mobilePane === 'room' ? 'channels' : 'areas'; })
+          .onClick(() => { this.backToParent(); })
         }
 
         if (this.captionMerged) {
@@ -1644,11 +1725,6 @@ struct NativeVoice {
           Text($r('app.string.app_name')).fontSize(14).fontWeight(FontWeight.Medium).fontColor(getTheme(this.isDark).text)
         }
         Blank()
-        if (this.pageWidth - this.captionInset >= 400) {
-          Text(this.wsConnected ? '实时已连接' : '实时连接中')
-            .fontSize(11)
-            .fontColor(this.wsConnected ? getTheme(this.isDark).speaking : getTheme(this.isDark).textMuted)
-        }
         Button({ type: ButtonType.Normal }) {
           SymbolGlyph($r('sys.symbol.ellipsis_circle')).fontSize(19).fontColor([getTheme(this.isDark).textSecondary])
         }
@@ -1665,8 +1741,8 @@ struct NativeVoice {
     }
     .width('100%')
     .backgroundColor(getTheme(this.isDark).surfaceSolid)
-    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 0))
     .border({ width: { bottom: 1 }, color: getTheme(this.isDark).borderSubtle })
+    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 0))
   }
 
   @Builder
@@ -1825,7 +1901,7 @@ struct NativeVoice {
         .bindMenu(this.desktopDomainMenu())
       }
 
-      if (this.textChannels.length + this.voiceChannels.length === 0) {
+      if (this.channelCards.length === 0) {
         Text(this.readingRooms ? '正在读取频道…' : '暂无可浏览的频道')
           .fontSize(12)
           .fontColor(getTheme(this.isDark).textMuted)
@@ -1898,38 +1974,81 @@ struct NativeVoice {
   }
 
   @Builder
-  private desktopCallActions() {
-    Row({ space: 7 }) {
-      Button({ type: ButtonType.Circle }) {
-        SymbolGlyph(this.muted ? $r('sys.symbol.mic_slash') : $r('sys.symbol.mic'))
-          .fontSize(17)
-          .fontColor([this.muted ? getTheme(this.isDark).accent : getTheme(this.isDark).text])
+  private callActions(compact: boolean) {
+    Row({ space: 6 }) {
+      Row() {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph(this.muted ? $r('sys.symbol.mic_slash') : $r('sys.symbol.mic'))
+            .fontSize(18)
+            .fontColor([this.muted ? getTheme(this.isDark).accent : getTheme(this.isDark).text])
+        }
+        .width(35)
+        .height(42)
+        .padding(0)
+        .borderRadius(AppSpacing.radiusSm)
+        .backgroundColor(Color.Transparent)
+        .accessibilityText(this.muted ? '麦克风已闭麦，点击打开' : '麦克风，点击闭麦')
+        .enabled(this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING)
+        .hoverEffect(HoverEffect.Highlight)
+        .onClick(() => { this.toggleMicrophone(); })
+        Divider().vertical(true).height(15).color(getTheme(this.isDark).borderSubtle)
+        this.inputDevicePicker()
+      }
+      .height(42)
+      .borderRadius(AppSpacing.radius)
+      .backgroundColor(this.muted ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surfaceAlt)
+
+      Row() {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph(this.speakerMuted ? $r('sys.symbol.speaker_slash') : $r('sys.symbol.speaker'))
+            .fontSize(18)
+            .fontColor([this.speakerMuted ? getTheme(this.isDark).accent : getTheme(this.isDark).text])
+        }
+        .width(35)
+        .height(42)
+        .padding(0)
+        .borderRadius(AppSpacing.radiusSm)
+        .backgroundColor(Color.Transparent)
+        .accessibilityText(this.speakerMuted ? '扬声器已静音，点击恢复' : '扬声器，点击静音')
+        .enabled(this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING)
+        .hoverEffect(HoverEffect.Highlight)
+        .onClick(() => { this.toggleSpeaker(); })
+        Divider().vertical(true).height(15).color(getTheme(this.isDark).borderSubtle)
+        VoiceOutputPicker({
+          label: this.routes.output,
+          isDark: this.isDark,
+          split: true,
+          sessionType: this.state !== CallState.LEAVING ? (this.routes.pickerType ?? '') : '',
+          onOpenChange: (open: boolean) => { this.deviceMenuState('voice-output-picker', open); }
+        })
+      }
+      .height(42)
+      .borderRadius(AppSpacing.radius)
+      .backgroundColor(this.speakerMuted ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surfaceAlt)
+
+      Button({ type: ButtonType.Normal }) {
+        SymbolGlyph($r('sys.symbol.waveform')).fontSize(17)
+          .fontColor([this.showMicGain ? getTheme(this.isDark).accent : getTheme(this.isDark).text])
       }
       .width(40)
-      .height(38)
-      .backgroundColor(this.muted ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surfaceAlt)
-      .accessibilityText(this.muted ? '麦克风已静音，点击打开' : '麦克风，点击静音')
-      .enabled(this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING)
-      .hoverEffect(HoverEffect.Highlight)
-      .onClick(() => { this.toggleMicrophone(); })
-
-      this.inputDevicePicker()
-      VoiceOutputPicker({
-        label: this.routes.output,
-        isDark: this.isDark,
-        compact: this.isDesktopCallBarCompact(),
-        sessionType: this.state !== CallState.LEAVING ? (this.routes.pickerType ?? '') : '',
-        onRefresh: () => { this.voiceRoute.refresh(); }
-      })
+      .height(42)
+      .padding(0)
+      .borderRadius(AppSpacing.radius)
+      .backgroundColor(this.showMicGain ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surfaceAlt)
+      .accessibilityText('调节麦克风发送音量')
+      .onClick(() => { this.showMicGain = !this.showMicGain; })
 
       Button({ type: ButtonType.Capsule }) {
-        Row({ space: 5 }) {
-          SymbolGlyph($r('sys.symbol.phone_down_fill')).fontSize(16).fontColor([getTheme(this.isDark).dangerText])
-          Text(this.state === CallState.JOINING ? '取消' : '离开').fontSize(12).fontColor(getTheme(this.isDark).dangerText)
+        Row({ space: 4 }) {
+          SymbolGlyph($r('sys.symbol.phone_down_fill')).fontSize(17).fontColor([getTheme(this.isDark).dangerText])
+          if (!compact) {
+            Text(this.state === CallState.JOINING ? '取消' : '离开').fontSize(12)
+              .fontColor(getTheme(this.isDark).dangerText)
+          }
         }
       }
-      .height(38)
-      .padding({ left: 10, right: 10 })
+      .height(42)
+      .padding({ left: 12, right: 12 })
       .backgroundColor(getTheme(this.isDark).dangerFill)
       .accessibilityText(this.state === CallState.JOINING ? '取消加入语音' : '离开语音频道')
       .enabled(this.isInCall() && this.state !== CallState.LEAVING)
@@ -1939,17 +2058,61 @@ struct NativeVoice {
   }
 
   @Builder
+  private microphoneGainPanel() {
+    VoiceGainSlider({
+      label: '麦克风发送音量',
+      value: this.micGain,
+      max: MAX_MIC_GAIN,
+      isDark: this.isDark,
+      onGainChange: (gain: number, commit: boolean) => {
+        this.store.setMicGain(this.getAbilityContext(), gain, commit);
+      }
+    })
+  }
+
+  @Builder
+  private mobileCallBar() {
+    Column({ space: 4 }) {
+      if (this.showMicGain) {
+        this.microphoneGainPanel()
+      }
+      Row({ space: 5 }) {
+        this.desktopCallSummary()
+      }
+      .width('100%')
+      this.callActions(true)
+    }
+    .width('calc(100% - 20vp)')
+    .padding({ left: 8, right: 8, top: 2, bottom: 6 })
+    .margin({ top: 4, bottom: 4 })
+    .borderRadius(AppSpacing.radius)
+    .clip(true)
+    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 1, true))
+  }
+
+  @Builder
   private inputPickerGlyph() {
     Row() {
-      SymbolGlyph($r('sys.symbol.mic')).fontSize(17).fontColor([getTheme(this.isDark).accent])
-      SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(10).fontColor([getTheme(this.isDark).textMuted])
+      SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12).fontColor([getTheme(this.isDark).textSecondary])
     }
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.Center)
   }
 
+  private deviceMenuState(source: string, open: boolean): void {
+    this.store.setGripInteractionActive(source, open);
+    if (!open) this.voiceRoute.refresh();
+  }
+
+  private setMediaInputMenuOpen(open: boolean): void {
+    if (this.mediaInputMenuOpen === open) return;
+    this.mediaInputMenuOpen = open;
+    this.deviceMenuState('voice-input-menu', open);
+  }
+
   private async selectMediaInput(device?: audio.AudioDeviceDescriptor): Promise<void> {
+    this.setMediaInputMenuOpen(false);
     try {
       await this.voiceRoute.selectMediaInput(device);
     } catch {
@@ -1970,31 +2133,32 @@ struct NativeVoice {
 
   @Builder
   private inputDevicePicker() {
-    if (this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING) {
-      if (this.routes.independentInput) {
-        AVInputCastPicker({
-          customPicker: () => this.inputPickerGlyph(),
-          onStateChange: (state: AVCastPickerState) => {
-            if (state === AVCastPickerState.STATE_DISAPPEARING) this.voiceRoute.refresh();
-          }
-        })
-          .width(44)
-          .height(44)
-          .backgroundColor(getTheme(this.isDark).surfaceAlt)
-          .borderRadius(14)
-          .accessibilityText('选择麦克风设备')
-      } else if (this.routes.mediaInput) {
-        Button({ type: ButtonType.Normal }) {
-          this.inputPickerGlyph()
+    if (this.routes.independentInput) {
+      AVInputCastPicker({
+        customPicker: () => this.inputPickerGlyph(),
+        onStateChange: (state: AVCastPickerState) => {
+          this.deviceMenuState('voice-input-picker', state === AVCastPickerState.STATE_APPEARING);
         }
-        .width(44)
-        .height(44)
-        .padding(0)
-        .borderRadius(14)
-        .backgroundColor(getTheme(this.isDark).surfaceAlt)
-        .accessibilityText('选择麦克风设备')
-        .bindMenu(this.mediaInputMenu)
+      })
+        .width(39)
+        .height(42)
+        .accessibilityText(this.routes.input ? '选择麦克风，当前' + this.routes.input : '选择麦克风设备')
+    } else {
+      Button({ type: ButtonType.Normal }) {
+        this.inputPickerGlyph()
       }
+      .width(39)
+      .height(42)
+      .padding(0)
+      .borderRadius(AppSpacing.radiusSm)
+      .backgroundColor(Color.Transparent)
+      .enabled(this.routes.mediaInput)
+      .opacity(this.routes.mediaInput ? 1 : 0.42)
+      .accessibilityText(this.routes.mediaInput ? '选择麦克风设备' : '麦克风由系统选择')
+      .onClick(() => { this.setMediaInputMenuOpen(!this.mediaInputMenuOpen); })
+      .bindMenu(this.mediaInputMenuOpen, this.mediaInputMenu, {
+        onDisappear: () => { this.setMediaInputMenuOpen(false); }
+      })
     }
   }
 
@@ -2002,7 +2166,13 @@ struct NativeVoice {
   private desktopCallBar() {
     Column() {
       Column() {
-        this.desktopChromeHighlight()
+        if (this.showMicGain && this.isInCall()) {
+          Column() {
+            this.microphoneGainPanel()
+          }
+          .width('100%')
+          .padding({ left: 10, right: 10, top: 4 })
+        }
         if (this.isDesktopCallBarCompact()) {
           Row({ space: 5 }) {
             if (!this.showsDesktopDomainRail()) {
@@ -2015,7 +2185,9 @@ struct NativeVoice {
           .padding({ left: 8, right: 8, top: 2 })
 
           Row() {
-            this.desktopCallActions()
+            if (this.isInCall()) {
+              this.callActions(this.isDesktopCallBarCompact())
+            }
           }
           .width('100%')
           .padding({ left: 8, right: 8, bottom: 6 })
@@ -2027,7 +2199,9 @@ struct NativeVoice {
               this.desktopUserButton(true)
             }
             this.desktopCallSummary()
-            this.desktopCallActions()
+            if (this.isInCall()) {
+              this.callActions(this.isDesktopCallBarCompact())
+            }
           }
           .width('100%')
           .padding({ left: 10, right: 10, top: 5, bottom: 5 })
@@ -2035,10 +2209,10 @@ struct NativeVoice {
       }
       .width('100%')
       .backgroundColor(getTheme(this.isDark).surfaceSolid)
-      .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 0))
       .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
-      .borderRadius(12)
+      .borderRadius(AppSpacing.radius)
       .clip(true)
+      .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 1, true))
     }
     .width('100%')
     .padding({ left: 10, right: 10, top: 5, bottom: 10 })
@@ -2046,298 +2220,257 @@ struct NativeVoice {
 
   @Builder
   private headerBar() {
-    Row({ space: 10 }) {
-      if (!this.isWide() && this.mobilePane !== 'areas') {
-        Button('←')
-          .width(36)
-          .height(34)
-          .fontSize(16)
-          .borderRadius(10)
-          .backgroundColor(getTheme(this.isDark).surfaceAlt)
-          .fontColor(getTheme(this.isDark).text)
-          .onClick(() => {
-            if (this.mobilePane === 'room') {
-              this.mobilePane = 'channels';
-            } else {
-              this.mobilePane = 'areas';
-            }
-          })
-      }
-
-      Row({ space: 10 }) {
-        Image($r('app.media.app_icon')).width(30).height(30)
-
-        Column({ space: 1 }) {
-          Text($r('app.string.app_name'))
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(getTheme(this.isDark).text)
-          Row({ space: 5 }) {
-            Row()
-              .width(6)
-              .height(6)
-              .borderRadius(3)
-              .backgroundColor(this.wsConnected ? getTheme(this.isDark).speaking : getTheme(this.isDark).warn)
-            Text(this.wsConnected ? '实时已连接' : '正在连接')
-              .fontSize(10)
-              .fontColor(getTheme(this.isDark).textMuted)
-          }
+    Row({ space: 9 }) {
+      if (this.mobilePane === 'room' || this.mobilePane === 'home') {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(17).fontColor([getTheme(this.isDark).text])
         }
-        .alignItems(HorizontalAlign.Start)
+        .width(40)
+        .height(40)
+        .borderRadius(AppSpacing.radiusSm)
+        .backgroundColor(getTheme(this.isDark).surfaceAlt)
+        .accessibilityText('返回频道列表')
+        .onClick(() => { this.backToParent(); })
       }
-      .layoutWeight(1)
-
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-    .backgroundColor(getTheme(this.isDark).surfaceSolid)
-    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 1))
-    .border({ width: { bottom: 1 }, color: getTheme(this.isDark).borderSubtle })
-  }
-
-  @Builder
-  private areaPane() {
-    Column({ space: 10 }) {
-      Text('我的域')
-        .fontSize(13)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(getTheme(this.isDark).textMuted)
-        .padding({ left: 4, right: 4, top: 2 })
-
-      if (this.areas.length === 0) {
-        Text(this.readingRooms ? '正在读取域…' : '暂无已加入的域')
-          .fontSize(13)
-          .fontColor(getTheme(this.isDark).textMuted)
-          .padding(8)
-      } else {
-        Scroll() {
-          Column({ space: 8 }) {
-            ForEach(this.areas, (area: OopzArea) => {
-              Row({ space: 10 }) {
-                Stack() {
-                  Column() {
-                    Text(area.name.slice(0, 1).toUpperCase())
-                      .fontSize(14)
-                      .fontWeight(FontWeight.Bold)
-                      .fontColor(getTheme(this.isDark).accent)
-                  }
-                  .width(40)
-                  .height(40)
-                  .borderRadius(12)
-                  .backgroundColor(getTheme(this.isDark).surfaceAlt)
-                  .justifyContent(FlexAlign.Center)
-
-                  if (area.avatar.length > 0) {
-                    Image(area.avatar)
-                      .width(40)
-                      .height(40)
-                      .borderRadius(12)
-                      .objectFit(ImageFit.Cover)
-                  }
-                }
-                .width(40)
-                .height(40)
-
-                Column({ space: 2 }) {
-                  Text(area.name)
-                    .fontSize(14)
-                    .fontWeight(area.areaId === this.selectedAreaId ? FontWeight.Medium : FontWeight.Normal)
-                    .fontColor(getTheme(this.isDark).text)
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  if (area.code.length > 0) {
-                    Text(`域号 ${area.code}`)
-                      .fontSize(11)
-                      .fontColor(getTheme(this.isDark).textMuted)
-                  }
-                }
-                .layoutWeight(1)
-                .alignItems(HorizontalAlign.Start)
-
-                if (!this.isWide()) {
-                  Text('›').fontSize(18).fontColor(getTheme(this.isDark).textMuted)
-                }
-              }
-              .width('100%')
-              .padding({ left: 10, right: 10, top: 9, bottom: 9 })
-              .borderRadius(14)
-              .backgroundColor(area.areaId === this.selectedAreaId
-                ? getTheme(this.isDark).surface
-                : Color.Transparent)
-              .border({
-                width: area.areaId === this.selectedAreaId ? 1 : 0,
-                color: getTheme(this.isDark).specularBorder
-              })
-              .shadow(area.areaId === this.selectedAreaId
-                ? { radius: 12, color: getTheme(this.isDark).shadowColor, offsetY: 4 }
-                : { radius: 0, color: Color.Transparent })
-              .onClick(() => { this.selectArea(area.areaId, true); })
-            }, (area: OopzArea) => `${area.areaId}_${area.areaId === this.selectedAreaId ? 1 : 0}_${this.isDark ? 1 : 0}`)
-          }
-          .width('100%')
-          .padding({ bottom: this.isPc ? 8 : 96 })
-        }
+      Text(this.mobilePane === 'room' && !this.isWide()
+        ? (this.selectedChannelObj?.name ?? '频道')
+        : (this.selectedAreaObj?.name ?? '频道'))
         .layoutWeight(1)
-        .align(Alignment.TopStart)
-      }
-    }
-    .width('100%')
-    .height('100%')
-    .padding(12)
-    .backgroundColor(getTheme(this.isDark).canvasTint)
-    .alignItems(HorizontalAlign.Start)
-  }
-
-  @Builder
-  private channelPane() {
-    Column({ space: 10 }) {
-      Text(this.selectedAreaObj?.name ?? '频道')
-        .fontSize(17)
+        .fontSize(18)
         .fontWeight(FontWeight.Bold)
         .fontColor(getTheme(this.isDark).text)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .padding({ left: 4, right: 4 })
-
-      if (this.textChannels.length === 0 && this.voiceChannels.length === 0) {
-        Text(this.readingRooms ? '正在读取频道…' : '该域暂无频道')
-          .fontSize(13)
-          .fontColor(getTheme(this.isDark).textMuted)
-          .padding(8)
-      } else {
-        Scroll() {
-          Column({ space: 6 }) {
-            if (this.textChannels.length > 0) {
-              Text('文字频道')
-                .fontSize(11)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(getTheme(this.isDark).textMuted)
-                .padding({ left: 6, top: 2, bottom: 2 })
-
-              ForEach(this.textChannels, (ch: ChannelCard) => {
-                Row({ space: 10 }) {
-                  Column() {
-                    Text('#')
-                      .fontSize(15)
-                      .fontWeight(FontWeight.Bold)
-                      .fontColor(ch.isSelected ? getTheme(this.isDark).accent : getTheme(this.isDark).textMuted)
-                  }
-                  .width(32)
-                  .height(32)
-                  .borderRadius(10)
-                  .backgroundColor(ch.isSelected ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surfaceAlt)
-                  .justifyContent(FlexAlign.Center)
-
-                  Column({ space: 2 }) {
-                    Text(ch.name)
-                      .fontSize(14)
-                      .fontWeight(ch.isSelected ? FontWeight.Medium : FontWeight.Normal)
-                      .fontColor(getTheme(this.isDark).text)
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    Text(ch.previewText)
-                      .fontSize(11)
-                      .fontColor(getTheme(this.isDark).textMuted)
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  }
-                  .layoutWeight(1)
-                  .alignItems(HorizontalAlign.Start)
-                }
-                .width('100%')
-                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-                .borderRadius(13)
-                .backgroundColor(ch.isSelected ? getTheme(this.isDark).surface : Color.Transparent)
-                .border({
-                  width: ch.isSelected ? 1 : 0,
-                  color: getTheme(this.isDark).specularBorder
-                })
-                .shadow(ch.isSelected
-                  ? { radius: 10, color: getTheme(this.isDark).shadowColor, offsetY: 3 }
-                  : { radius: 0, color: Color.Transparent })
-                .onClick(() => { this.selectChannel(ch.channelId); })
-              }, (ch: ChannelCard) => `${ch.channelId}_${ch.isSelected ? 1 : 0}_${ch.isDark ? 1 : 0}`)
-            }
-
-            if (this.voiceChannels.length > 0) {
-              Text('语音频道')
-                .fontSize(11)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(getTheme(this.isDark).textMuted)
-                .padding({ left: 6, top: this.textChannels.length > 0 ? 10 : 2, bottom: 2 })
-
-              ForEach(this.voiceChannels, (ch: ChannelCard) => {
-                Row({ space: 10 }) {
-                  Column() {
-                    Text('🔊').fontSize(14)
-                  }
-                  .width(34)
-                  .height(34)
-                  .borderRadius(11)
-                  .backgroundColor(ch.inCall ? getTheme(this.isDark).speakingSoft :
-                    (ch.isSelected ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surfaceAlt))
-                  .justifyContent(FlexAlign.Center)
-
-                  Column({ space: 2 }) {
-                    Row({ space: 6 }) {
-                      Text(ch.name)
-                        .fontSize(14)
-                        .fontWeight(ch.isSelected ? FontWeight.Medium : FontWeight.Normal)
-                        .fontColor(getTheme(this.isDark).text)
-                        .maxLines(1)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis })
-                        .layoutWeight(1)
-                      if (ch.inCall) {
-                        Text('通话中')
-                          .fontSize(10)
-                          .fontColor(getTheme(this.isDark).speaking)
-                          .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-                          .borderRadius(8)
-                          .backgroundColor(getTheme(this.isDark).speakingSoft)
-                      } else if (ch.onlineCount > 0) {
-                        Text(`${ch.onlineCount}人`)
-                          .fontSize(11)
-                          .fontColor(getTheme(this.isDark).accent)
-                      }
-                    }
-                    .width('100%')
-
-                    Text(ch.group.length > 0 ? `${ch.group} · ${ch.previewText}` : ch.previewText)
-                      .fontSize(11)
-                      .fontColor(ch.onlineCount > 0 ? getTheme(this.isDark).textSecondary : getTheme(this.isDark).textMuted)
-                      .maxLines(1)
-                      .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  }
-                  .layoutWeight(1)
-                  .alignItems(HorizontalAlign.Start)
-                }
-                .width('100%')
-                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-                .borderRadius(13)
-                .backgroundColor(ch.isSelected ? getTheme(this.isDark).surface : Color.Transparent)
-                .border({
-                  width: ch.isSelected ? 1 : 0,
-                  color: getTheme(this.isDark).specularBorder
-                })
-                .shadow(ch.isSelected
-                  ? { radius: 10, color: getTheme(this.isDark).shadowColor, offsetY: 3 }
-                  : { radius: 0, color: Color.Transparent })
-                .onClick(() => { this.selectChannel(ch.channelId); })
-              }, (ch: ChannelCard) =>
-                `${ch.channelId}_${ch.onlineCount}_${ch.previewText}_${ch.isSelected ? 1 : 0}_${ch.inCall ? 1 : 0}_${ch.isDark ? 1 : 0}`)
-            }
-          }
-          .width('100%')
-          .padding({ bottom: 104 })
+      if (this.mobilePane === 'channels') {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph($r('sys.symbol.ellipsis_circle')).fontSize(22).fontColor([getTheme(this.isDark).text])
         }
-        .layoutWeight(1)
-        .align(Alignment.TopStart)
+        .width(40)
+        .height(40)
+        .borderRadius(AppSpacing.radiusSm)
+        .backgroundColor(Color.Transparent)
+        .accessibilityText('频道操作')
+        .bindMenu(this.mobileChannelMenu())
       }
     }
     .width('100%')
+    .padding({ left: 12, right: 10, top: 6, bottom: 6 })
+    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 0))
+  }
+
+  @Builder
+  private mobileChannelMenu() {
+    Menu() {
+      MenuItem({ content: '刷新域与频道' })
+        .enabled(!this.readingRooms)
+        .onClick(() => { this.loadAreas(); })
+      MenuItem({ content: '打开 Oopz 网页' })
+        .enabled(!this.isInCall())
+        .onClick(() => { this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' }).catch(() => {}); })
+    }
+  }
+
+  @Builder
+  private mobileDomainRail() {
+    Scroll() {
+      Column({ space: 8 }) {
+        ForEach(this.areas, (area: OopzArea) => {
+          Button({ type: ButtonType.Normal }) {
+            if (area.avatar.length > 0) {
+              Image(area.avatar).width(34).height(34).borderRadius(AppSpacing.radiusSm).objectFit(ImageFit.Cover)
+            } else {
+              Text(area.name.slice(0, 1)).fontSize(17).fontColor(getTheme(this.isDark).text)
+            }
+          }
+          .width(44)
+          .height(44)
+          .padding(0)
+          .borderRadius(AppSpacing.radius)
+          .backgroundColor(area.areaId === this.selectedAreaId ? getTheme(this.isDark).accentSoft :
+            getTheme(this.isDark).surfaceAlt)
+          .border({ width: 1, color: area.areaId === this.selectedAreaId ? getTheme(this.isDark).accent :
+            Color.Transparent })
+          .accessibilityText(area.name)
+          .onClick(() => { this.selectArea(area.areaId); })
+        }, (area: OopzArea) => area.areaId)
+      }
+      .width('100%')
+      .padding({ top: 8, bottom: 10 })
+    }
+    .scrollBar(BarState.Off)
+    .width(56)
     .height('100%')
-    .padding(12)
-    .alignItems(HorizontalAlign.Start)
+    .backgroundColor(getTheme(this.isDark).rail)
+    .borderRadius({ topRight: AppSpacing.radius, bottomRight: AppSpacing.radius })
+    .align(Alignment.Top)
+  }
+
+  private toggleChannelMembers(channelId: string): void {
+    this.expandedChannels = this.expandedChannels.includes(channelId)
+      ? this.expandedChannels.filter((id: string) => id !== channelId)
+      : this.expandedChannels.concat([channelId]);
+  }
+
+  private rememberChannelPosition(): void {
+    if (this.selectedAreaId.length === 0) return;
+    try {
+      this.channelOffsets.set(this.selectedAreaId, this.channelScroller.currentOffset().yOffset);
+    } catch {
+      // The list may already have left the view.
+    }
+  }
+
+  private restoreChannelPosition(): void {
+    const areaId = this.selectedAreaId;
+    const yOffset = this.channelOffsets.get(areaId) ?? 0;
+    setTimeout(() => {
+      if (!this.activePage || this.selectedAreaId !== areaId) return;
+      try {
+        this.channelScroller.scrollTo({ xOffset: 0, yOffset: yOffset, animation: false });
+      } catch {
+        // The list has not appeared on this layout.
+      }
+    }, 0);
+  }
+
+  @Builder
+  private mobileChannelRow(channel: ChannelCard) {
+    Row({ space: 4 }) {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 8 }) {
+          SymbolGlyph(channel.isText ? $r('sys.symbol.message') : $r('sys.symbol.mic'))
+            .fontSize(17)
+            .fontColor([channel.inCall ? getTheme(this.isDark).accent : getTheme(this.isDark).textSecondary])
+          Text(channel.name)
+            .layoutWeight(1)
+            .fontSize(14)
+            .fontWeight(channel.inCall ? FontWeight.Medium : FontWeight.Normal)
+            .fontColor(getTheme(this.isDark).text)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (!channel.isText) {
+            Text(channel.maxMember > 0 ? channel.onlineCount + '/' + channel.maxMember : String(channel.onlineCount))
+              .fontSize(11)
+              .fontColor(getTheme(this.isDark).textMuted)
+          }
+        }
+        .width('100%')
+      }
+      .layoutWeight(1)
+      .height(40)
+      .padding({ left: 8, right: 6 })
+      .borderRadius(AppSpacing.radiusSm)
+      .backgroundColor(Color.Transparent)
+      .accessibilityText(channel.name)
+      .onClick(() => { this.selectChannel(channel.channelId); })
+      if (!channel.isText && channel.members.length > 0) {
+        Button({ type: ButtonType.Normal }) {
+          SymbolGlyph(this.expandedChannels.includes(channel.channelId) ? $r('sys.symbol.chevron_up') :
+            $r('sys.symbol.chevron_down')).fontSize(12).fontColor([getTheme(this.isDark).textSecondary])
+        }
+        .width(36)
+        .height(40)
+        .padding(0)
+        .borderRadius(AppSpacing.radiusSm)
+        .backgroundColor(Color.Transparent)
+        .accessibilityText(this.expandedChannels.includes(channel.channelId) ? '收起 ' + channel.name + ' 的成员' :
+          '展开 ' + channel.name + ' 的成员')
+        .onClick(() => { this.toggleChannelMembers(channel.channelId); })
+      }
+    }
+    .width('100%')
+    .borderRadius(AppSpacing.radiusSm)
+    .backgroundColor(channel.inCall || (this.mobilePane === 'room' && channel.isSelected)
+      ? getTheme(this.isDark).accentSoft : Color.Transparent)
+
+    if (this.expandedChannels.includes(channel.channelId) && channel.members.length > 0) {
+      Column({ space: 4 }) {
+        ForEach(channel.members, (member: ChannelMemberPreview) => {
+          Row({ space: 8 }) {
+            if (member.avatar.length > 0) {
+              Image(member.avatar).width(24).height(24).borderRadius(12).objectFit(ImageFit.Cover)
+            } else {
+              SymbolGlyph($r('sys.symbol.person')).fontSize(24)
+                .fontColor([getTheme(this.isDark).textMuted])
+            }
+            Text(member.name).fontSize(12).fontColor(getTheme(this.isDark).textSecondary)
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .height(29)
+        }, (member: ChannelMemberPreview) => member.uid + member.name + member.avatar)
+      }
+      .width('100%')
+      .padding({ left: 25, right: 6, bottom: 4 })
+    }
+  }
+
+  @Builder
+  private mobileChannelBrowser() {
+    Scroll(this.channelScroller) {
+      Column({ space: 3 }) {
+        if (this.selectedAreaObj !== undefined) {
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 8 }) {
+              SymbolGlyph($r('sys.symbol.house')).fontSize(17).fontColor([getTheme(this.isDark).textSecondary])
+              Text('主页').fontSize(14).fontColor(getTheme(this.isDark).text)
+            }
+            .width('100%')
+          }
+          .width('100%')
+          .height(40)
+          .padding({ left: 8, right: 8 })
+          .borderRadius(AppSpacing.radiusSm)
+          .backgroundColor(getTheme(this.isDark).surfaceAlt)
+          .accessibilityText('域主页')
+          .onClick(() => { this.mobilePane = 'home'; })
+        }
+        ForEach(this.desktopChannelItems(), (item: ChannelListItem) => {
+          if (item.channel === undefined) {
+            Text(item.label)
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(getTheme(this.isDark).textSecondary)
+              .padding({ left: 8, top: 10, bottom: 2 })
+              .maxLines(1)
+          } else {
+            this.mobileChannelRow(item.channel)
+          }
+        }, (item: ChannelListItem) => item.key)
+        if (this.channelCards.length === 0) {
+          Text(this.readingRooms ? '正在加载频道…' : (this.notice || '暂无频道'))
+            .fontSize(13)
+            .fontColor(getTheme(this.isDark).textMuted)
+            .padding(10)
+        }
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 8, right: 8, top: 8, bottom: 12 })
+    }
+    .scrollBar(BarState.Off)
+    .width('100%')
+    .height('100%')
+    .align(Alignment.TopStart)
+    .onAppear(() => { this.restoreChannelPosition(); })
+    .onScrollStop(() => { this.rememberChannelPosition(); })
+  }
+
+  @Builder
+  private domainHome() {
+    Column({ space: 12 }) {
+      if ((this.selectedAreaObj?.avatar ?? '').length > 0) {
+        Image(this.selectedAreaObj?.avatar ?? '').width(62).height(62).borderRadius(AppSpacing.radius)
+          .objectFit(ImageFit.Cover)
+      }
+      Text(this.selectedAreaObj?.name ?? '域主页').fontSize(21).fontWeight(FontWeight.Bold)
+        .fontColor(getTheme(this.isDark).text).maxLines(2)
+      Text(this.channelCards.length + ' 个频道').fontSize(13).fontColor(getTheme(this.isDark).textSecondary)
+    }
+    .width('100%')
+    .height('100%')
+    .padding(24)
+    .justifyContent(FlexAlign.Center)
   }
 
   @Builder
@@ -2427,6 +2560,13 @@ struct NativeVoice {
           .onChange((val: string) => { this.chatInput = val; })
           .onSubmit(() => { this.sendChatMessage(); })
 
+        ChatEmojiPicker({
+          isDark: this.isDark,
+          isOpen: $emojiPickerOpen,
+          onPick: (emoji: string) => { this.chatInput += emoji; },
+          onOpenChange: (open: boolean) => { this.store.setGripInteractionActive('voice-emoji', open); }
+        })
+
         Button(this.sendingChat ? '发送中' : '发送')
           .height(42)
           .padding({ left: 16, right: 16 })
@@ -2449,7 +2589,7 @@ struct NativeVoice {
       left: 16,
       right: 16,
       top: 14,
-      bottom: this.isPc ? 8 : (this.isInCall() && !this.isViewingActiveRoom() ? 124 : 78)
+      bottom: 8
     })
   }
 
@@ -2600,12 +2740,16 @@ struct NativeVoice {
           .shadow({ radius: 22, color: getTheme(this.isDark).shadowColor, offsetY: 8 })
         }
 
-        if (!this.isPc && this.isViewingActiveRoom()) {
+        if (this.isViewingActiveRoom()) {
           VoiceMicStatus({
             muted: this.muted,
             capturing: this.capturing,
             input: this.routes.input,
             output: this.routes.output,
+            playbackMuted: this.speakerMuted,
+            volumeType: volumeLabel(this.routes.usage),
+            rates: this.rates,
+            task: this.taskStatus,
             isDark: this.isDark
           })
         }
@@ -2625,76 +2769,6 @@ struct NativeVoice {
               .onClick(() => { this.join(); })
           }
           .width('100%')
-        } else if (!this.isPc && this.isViewingActiveRoom()) {
-          Row({ space: 6 }) {
-            Button({ type: ButtonType.Normal }) {
-              SymbolGlyph(this.muted ? $r('sys.symbol.mic_slash') : $r('sys.symbol.mic'))
-                .fontSize(19)
-                .fontColor([this.muted ? getTheme(this.isDark).accent : getTheme(this.isDark).text])
-            }
-              .layoutWeight(1)
-              .height(44)
-              .borderRadius(14)
-              .backgroundColor(this.muted ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surface)
-              .border({ width: 1, color: getTheme(this.isDark).specularBorder })
-              .accessibilityText(this.muted ? '打开麦克风' : '关闭麦克风')
-              .enabled(this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING)
-              .onClick(() => { this.toggleMicrophone(); })
-
-            this.inputDevicePicker()
-            VoiceOutputPicker({
-              label: this.routes.output,
-              isDark: this.isDark,
-              compact: true,
-              sessionType: this.state !== CallState.LEAVING ? (this.routes.pickerType ?? '') : '',
-              onRefresh: () => { this.voiceRoute.refresh(); }
-            })
-            Button({ type: ButtonType.Normal }) {
-              SymbolGlyph($r('sys.symbol.waveform'))
-                .fontSize(18)
-                .fontColor([this.showMicGain ? getTheme(this.isDark).accent : getTheme(this.isDark).text])
-            }
-              .width(44)
-              .height(44)
-              .padding(0)
-              .borderRadius(14)
-              .backgroundColor(this.showMicGain ? getTheme(this.isDark).accentSoft : getTheme(this.isDark).surfaceAlt)
-              .accessibilityText('调节麦克风发送音量')
-              .onClick(() => { this.showMicGain = !this.showMicGain; })
-
-            Button({ type: ButtonType.Normal }) {
-              SymbolGlyph($r('sys.symbol.phone_down_fill'))
-                .fontSize(18)
-                .fontColor([getTheme(this.isDark).dangerText])
-            }
-              .width(54)
-              .height(44)
-              .padding(0)
-              .borderRadius(14)
-              .backgroundColor(getTheme(this.isDark).dangerFill)
-              .accessibilityText(this.state === CallState.JOINING ? '取消加入语音' : '离开语音频道')
-              .enabled(this.state !== CallState.LEAVING)
-              .onClick(() => { this.leave(); })
-          }
-          .width('100%')
-
-          if (this.showMicGain) {
-            Column() {
-              VoiceGainSlider({
-                label: '麦克风发送音量',
-                value: this.micGain,
-                max: MAX_MIC_GAIN,
-                isDark: this.isDark,
-                onGainChange: (gain: number, commit: boolean) => {
-                  this.store.setMicGain(this.getAbilityContext(), gain, commit);
-                }
-              })
-            }
-            .width('100%')
-            .padding({ left: 14, right: 14, top: 10, bottom: 4 })
-            .borderRadius(14)
-            .backgroundColor(getTheme(this.isDark).surface)
-          }
         } else if (!this.isViewingActiveRoom()) {
           Row({ space: 8 }) {
             Button(this.state === CallState.JOINING ? '正在加入语音' : '切换到此频道')
@@ -2763,7 +2837,7 @@ struct NativeVoice {
         }
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: this.isPc ? 0 : 16, bottom: this.isPc ? 8 : 112 })
+      .padding({ left: 16, right: 16, top: this.isPc ? 0 : 16, bottom: 12 })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
@@ -2815,9 +2889,7 @@ struct NativeVoice {
                 settingsFirst: this.desktopPane === 'settings',
                 onClose: () => { this.desktopPane = 'room'; }
               })
-            } else if (!this.isWide() && this.mobilePane === 'areas') {
-              this.areaPane()
-            } else if (!this.isWide() && this.mobilePane === 'channels') {
+            } else if (!this.isWide() && this.mobilePane !== 'room') {
               this.desktopChannelPane()
             } else {
               this.roomDetailPane()
@@ -2841,98 +2913,84 @@ struct NativeVoice {
 
   @Builder
   private mobileShell() {
-    Stack({ alignContent: Alignment.Bottom }) {
-      Column()
-        .width('100%')
-        .height('100%')
-        .backgroundColor(getTheme(this.isDark).bg)
-
-      if (this.useImmersiveLight() && (this.selectedAreaObj?.banner ?? this.selectedAreaObj?.avatar ?? '').length > 0) {
-        Image(this.selectedAreaObj?.banner ?? this.selectedAreaObj?.avatar ?? '')
+    Stack() {
+      if (deviceInfo.apiAvailable('26.0.0')) {
+        Column()
           .width('100%')
           .height('100%')
-          .objectFit(ImageFit.Cover)
-          .blur(64)
-          .opacity(this.isDark ? 0.14 : 0.06)
+          .backgroundColor(getTheme(this.isDark).bg)
+          .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+          .systemBarEffect()
+          .hitTestBehavior(HitTestMode.None)
+      } else {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor(getTheme(this.isDark).bg)
+          .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
           .hitTestBehavior(HitTestMode.None)
       }
 
-      if (this.useImmersiveLight()) {
-        Column()
-          .width(420)
-          .height(420)
-          .borderRadius(210)
-          .position({ left: -120, top: -80 })
-          .radialGradient({
-            center: [210, 210],
-            radius: 210,
-            colors: [[getTheme(this.isDark).glowTop, 0.0], [Color.Transparent, 1.0]]
-          })
-          .hitTestBehavior(HitTestMode.None)
-
-        Column()
-          .width(380)
-          .height(380)
-          .borderRadius(190)
-          .position({ right: -90, bottom: -60 })
-          .radialGradient({
-            center: [190, 190],
-            radius: 190,
-            colors: [[getTheme(this.isDark).glowBottom, 0.0], [Color.Transparent, 1.0]]
-          })
-          .hitTestBehavior(HitTestMode.None)
-      }
-
-      // Layer 2: Header + Responsive Multi-Pane Content
       Column() {
-        this.headerBar()
-
-        if (this.isWide()) {
-          Row() {
-            Column() {
-              this.areaPane()
-            }
-            .width(204)
-            .height('100%')
-
-            Column() {
-              this.channelPane()
-            }
-            .width(244)
-            .height('100%')
-            .border({ width: { left: 1, right: 1 }, color: getTheme(this.isDark).borderSubtle })
-
-            Column() {
-              this.roomDetailPane()
-            }
-            .layoutWeight(1)
-            .height('100%')
-          }
-          .width('100%')
-          .layoutWeight(1)
-        } else {
-          Column() {
-            if (this.mobilePane === 'areas') {
-              this.areaPane()
-            } else if (this.mobilePane === 'channels') {
-              this.channelPane()
-            } else {
-              this.roomDetailPane()
-            }
-          }
-          .width('100%')
-          .layoutWeight(1)
+        if (this.mobilePane !== 'account') {
+          this.headerBar()
         }
+
+        Column() {
+          if (this.mobilePane === 'account') {
+            AccountPanel({ embedded: true, onClose: () => { this.backToParent(); } })
+          } else if (this.isWide()) {
+            Row() {
+              this.mobileDomainRail()
+              Column() {
+                this.mobileChannelBrowser()
+              }
+              .width(226)
+              .height('100%')
+              Column() {
+                if (this.mobilePane === 'room') {
+                  this.roomDetailPane()
+                } else {
+                  this.domainHome()
+                }
+              }
+              .layoutWeight(1)
+              .height('100%')
+            }
+            .width('100%')
+            .height('100%')
+          } else if (this.mobilePane === 'channels') {
+            Row() {
+              this.mobileDomainRail()
+              Column() {
+                this.mobileChannelBrowser()
+              }
+              .layoutWeight(1)
+              .height('100%')
+            }
+            .width('100%')
+            .height('100%')
+          } else if (this.mobilePane === 'home') {
+            this.domainHome()
+          } else {
+            this.roomDetailPane()
+          }
+        }
+        .width('100%')
+        .layoutWeight(1)
+
+        if (this.isInCall()) {
+          this.mobileCallBar()
+        }
+        BottomBar({
+          active: this.mobilePane === 'account' ? 'account' : 'voice',
+          showMiniBar: false,
+          onNavigate: (tab: string) => { this.switchMobileTab(tab); },
+          onReturnRoom: () => { this.jumpToActiveRoom(); }
+        })
       }
       .width('100%')
       .height('100%')
-
-      // Layer 3: Floating Glass Bottom Dock + Mini Call Bar
-      BottomBar({
-        active: 'voice',
-        showMiniBar: this.isInCall() && !this.isViewingActiveRoom(),
-        onReturnRoom: () => { this.jumpToActiveRoom(); }
-      })
     }
     .width('100%')
     .height('100%')
@@ -2952,8 +3010,7 @@ struct NativeVoice {
       const w = parseFloat(String(newVal.width));
       if (w > 0 && Math.abs(w - this.pageWidth) >= 2) {
         if (this.isPc && this.isWide() && w < PC_CHANNEL_BREAKPOINT_VP) {
-          this.mobilePane = this.selectedChannelObj !== undefined ? 'room' :
-            (this.selectedAreaObj !== undefined ? 'channels' : 'areas');
+          this.mobilePane = this.selectedChannelObj !== undefined ? 'room' : 'channels';
         }
         this.pageWidth = w;
       }

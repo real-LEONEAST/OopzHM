@@ -25,6 +25,7 @@ export struct AccountPanel {
   @StorageProp('oopzSelfPid') private selfPid: string = '';
   @StorageProp('oopzSelfGreeting') private selfGreeting: string = '';
   @StorageProp('oopzWsConnected') private wsConnected: boolean = false;
+  @StorageProp('oopzMicCue') private micCue: boolean = false;
   @StorageProp('oopzInCall') private inCall: boolean = false;
   @StorageProp('oopzCallAreaName') private callAreaName: string = '';
   @StorageProp('oopzCallChannelName') private callChannelName: string = '';
@@ -104,7 +105,7 @@ export struct AccountPanel {
       .height(32)
       .padding({ left: 12, right: 12 })
       .fontSize(12)
-      .borderRadius(10)
+      .borderRadius(AppSpacing.radiusSm)
       .backgroundColor(this.themeMode === mode ? getTheme(this.isDark).accent : getTheme(this.isDark).surfaceAlt)
       .fontColor(this.themeMode === mode ? getTheme(this.isDark).accentText : getTheme(this.isDark).textSecondary)
       .fontWeight(this.themeMode === mode ? FontWeight.Medium : FontWeight.Normal)
@@ -175,7 +176,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
   }
 
@@ -198,7 +199,8 @@ export struct AccountPanel {
       Row({ space: 12 }) {
         Column({ space: 2 }) {
           Text('沉浸光感').fontSize(14).fontColor(getTheme(this.isDark).text)
-          Text(supportsImmersiveLight() ? '标题栏和通话条使用轻薄系统材质' : '当前设备使用标准外观')
+          Text(!this.immersiveLight ? '标题栏、通话条与底部导航使用实底' :
+            (supportsImmersiveLight() ? '标题栏、通话条与底部导航使用轻薄材质' : '使用轻薄高光'))
             .fontSize(11)
             .fontColor(getTheme(this.isDark).textMuted)
         }
@@ -220,6 +222,15 @@ export struct AccountPanel {
         isDark: this.isDark,
         onGainChange: (gain: number, commit: boolean) => { this.store.setMicGain(this.context(), gain, commit); }
       })
+
+      Row({ space: 12 }) {
+        Text('开关麦克风提示音').layoutWeight(1).fontSize(14).fontColor(getTheme(this.isDark).text)
+        Toggle({ type: ToggleType.Switch, isOn: this.micCue })
+          .accessibilityText('开关麦克风提示音')
+          .selectedColor(getTheme(this.isDark).accent)
+          .onChange((enabled: boolean) => { this.store.setMicCue(this.context(), enabled); })
+      }
+      .width('100%')
 
       if (!this.isPc) {
         Row({ space: 8 }) {
@@ -260,7 +271,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .alignItems(HorizontalAlign.Start)
   }
@@ -287,7 +298,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .alignItems(HorizontalAlign.Start)
   }
@@ -302,7 +313,7 @@ export struct AccountPanel {
       Button(this.busy ? '正在退出…' : '退出登录')
         .width('100%')
         .height(44)
-        .borderRadius(12)
+        .borderRadius(AppSpacing.radiusSm)
         .backgroundColor(getTheme(this.isDark).dangerFill)
         .fontColor(getTheme(this.isDark).dangerText)
         .fontWeight(FontWeight.Medium)
@@ -312,7 +323,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .alignItems(HorizontalAlign.Start)
   }
@@ -366,7 +377,8 @@ export struct AccountPanel {
       }
       .width('100%')
       .constraintSize({ maxWidth: 620 })
-      .padding({ top: 20, bottom: this.embedded ? 20 : 120, left: AppSpacing.page, right: AppSpacing.page })
+      .padding({ top: 20, bottom: this.embedded && this.isPc ? 20 : 120,
+        left: AppSpacing.page, right: AppSpacing.page })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')

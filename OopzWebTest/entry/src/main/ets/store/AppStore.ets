@@ -16,6 +16,7 @@ import type {
 
 const TAG: string = 'OopzStore';
 const UI_PREF_NAME: string = 'oopz_ui_prefs';
+const GRIP_STABILITY_MS: number = 500;
 
 export type PresenceListener = (areaId: string, channelId: string) => void;
 export type ChatListener = (channelId: string) => void;
@@ -49,19 +50,60 @@ export class AppStore {
   private credStore?: OopzCredStore;
   private presenceListener?: PresenceListener;
   private chatListener?: ChatListener;
+  private themeListener?: (isDark: boolean) => void;
   private prefsLoaded: boolean = false;
   private foreground: boolean = false;
   private observingGrip: boolean = false;
   private gripUnavailable: boolean = false;
   private gripSubscriptionFailed: boolean = false;
+  private gripCandidate?: string;
+  private stableGrip: string = 'center';
+  private gripTimer: number = -1;
+  private readonly gripInteractions: Set<string> = new Set<string>();
 
   private readonly onGripChanged = (status: motion.HoldingHandStatus): void => {
     if (!this.observingGrip) return;
+    if (status === motion.HoldingHandStatus.UNKNOWN_STATUS) {
+      this.clearGripCandidate();
+      return;
+    }
     let side = 'center';
     if (status === motion.HoldingHandStatus.LEFT_HAND_HELD) side = 'left';
     if (status === motion.HoldingHandStatus.RIGHT_HAND_HELD) side = 'right';
-    AppStorage.setOrCreate<string>('oopzHandGrip', side);
+    if (side === this.gripCandidate) return;
+    this.clearGripCandidate();
+    if (side === this.stableGrip) return;
+    this.gripCandidate = side;
+    this.gripTimer = setTimeout(() => {
+      this.gripTimer = -1;
+      this.gripCandidate = undefined;
+      this.stableGrip = side;
+      this.publishGrip();
+    }, GRIP_STABILITY_MS);
   };
+
+  private clearGripCandidate(): void {
+    if (this.gripTimer >= 0) {
+      clearTimeout(this.gripTimer);
+      this.gripTimer = -1;
+    }
+    this.gripCandidate = undefined;
+  }
+
+  private publishGrip(): void {
+    if (this.gripInteractions.size === 0) {
+      AppStorage.setOrCreate<string>('oopzHandGrip', this.stableGrip);
+    }
+  }
+
+  setGripInteractionActive(source: string, active: boolean): void {
+    if (active) {
+      this.gripInteractions.add(source);
+    } else {
+      this.gripInteractions.delete(source);
+      this.publishGrip();
+    }
+  }
 
   private constructor() {
     this.initStorageDefaults();
@@ -141,10 +183,12 @@ export class AppStore {
       const micGain = Number(await pref.get('micGain', DEFAULT_MIC_GAIN));
       const trayOnClose = Boolean(await pref.get('trayOnClose', true));
       const immersiveLight = Boolean(await pref.get('immersiveLight', true));
+      const micCue = Boolean(await pref.get('micCue', false));
       AppStorage.setOrCreate<boolean>('oopzGripEnabled', gripEnabled);
       this.setMicGain(undefined, micGain, false);
       AppStorage.setOrCreate<boolean>('oopzTrayOnClose', trayOnClose);
       AppStorage.setOrCreate<boolean>('oopzImmersiveLight', immersiveLight);
+      AppStorage.setOrCreate<boolean>('oopzMicCue', micCue);
       this.applyThemeMode(context, themeMode);
     } catch {
       hilog.warn(0x0, TAG, 'loadUiPrefs failed');
@@ -158,6 +202,7 @@ export class AppStore {
     const isDark = resolveIsDark(clean, sysDark);
     AppStorage.setOrCreate<string>('oopzThemeMode', clean);
     AppStorage.setOrCreate<boolean>('oopzIsDark', isDark);
+    this.themeListener?.(isDark);
     if (context !== undefined) {
       try {
         const appCtx = context.getApplicationContext();
@@ -172,6 +217,10 @@ export class AppStore {
         // ignore if unsupported on older platform
       }
     }
+  }
+
+  setThemeListener(listener?: (isDark: boolean) => void): void {
+    this.themeListener = listener;
   }
 
   setThemeMode(context: common.UIAbilityContext | undefined, mode: string): void {
@@ -225,7 +274,11 @@ export class AppStore {
       }
     }
     AppStorage.setOrCreate<boolean>('oopzGripSupported', supported && !this.gripSubscriptionFailed);
-    if (!this.observingGrip) AppStorage.setOrCreate<string>('oopzHandGrip', 'center');
+    if (!this.observingGrip) {
+      this.clearGripCandidate();
+      this.stableGrip = 'center';
+      this.publishGrip();
+    }
   }
 
   setMicGain(context: common.UIAbilityContext | undefined, value: number, commit: boolean): void {
@@ -241,6 +294,11 @@ export class AppStore {
     if (context !== undefined) {
       this.saveUiPrefValue(context, 'trayOnClose', enabled);
     }
+  }
+
+  setMicCue(context: common.UIAbilityContext | undefined, enabled: boolean): void {
+    AppStorage.setOrCreate<boolean>('oopzMicCue', enabled);
+    if (context !== undefined) this.saveUiPrefValue(context, 'micCue', enabled);
   }
 
   private saveUiPrefValue(context: common.UIAbilityContext, key: string, value: preferences.ValueType): void {
@@ -391,12 +449,13 @@ export class AppStore {
   }
 
   async loadChannels(areaId: string): Promise<OopzVoiceChannel[]> {
-    this.channels = await this.session.channels(areaId);
-    this.channelsByArea.set(areaId, this.channels);
-    const voiceChannels = this.channels.filter((c: OopzVoiceChannel): boolean =>
+    const channels = await this.session.channels(areaId);
+    this.channels = channels;
+    this.channelsByArea.set(areaId, channels);
+    const voiceChannels = channels.filter((c: OopzVoiceChannel): boolean =>
       c.type === 'VOICE' || c.type === 'AUDIO');
     await this.loadAreaPresence(areaId, voiceChannels);
-    return this.channels;
+    return channels;
   }
 
   async loadAreaPresence(areaId: string, channels: OopzVoiceChannel[]): Promise<void> {

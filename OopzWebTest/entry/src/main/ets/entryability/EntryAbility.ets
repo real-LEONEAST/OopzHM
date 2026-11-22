@@ -14,17 +14,37 @@ export default class EntryAbility extends UIAbility {
   private mainWindow?: window.Window;
 
   private syncThemeColors(systemColorMode?: ConfigurationConstant.ColorMode): void {
-    const sysDark = systemColorMode !== ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
-    AppStorage.setOrCreate<boolean>('oopzSystemIsDark', sysDark);
     const mode = AppStorage.get<string>('oopzThemeMode') ?? 'system';
+    let sysDark = AppStorage.get<boolean>('oopzSystemIsDark') ?? true;
+    if (mode === 'system' && (systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT ||
+      systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK)) {
+      sysDark = systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    }
+    AppStorage.setOrCreate<boolean>('oopzSystemIsDark', sysDark);
     const isDark = resolveIsDark(mode, sysDark);
     AppStorage.setOrCreate<boolean>('oopzIsDark', isDark);
-    if (this.mainWindow !== undefined) {
-      try {
-        this.mainWindow.setWindowBackgroundColor(getTheme(isDark).bg);
-      } catch {
-        // ignore background update errors
-      }
+    this.applyWindowTheme(isDark);
+  }
+
+  private applyWindowTheme(isDark: boolean): void {
+    const mainWindow = this.mainWindow;
+    if (mainWindow === undefined) return;
+
+    try {
+      // The window background fills both system areas while controls keep their normal safe-area layout.
+      mainWindow.setWindowBackgroundColor(getTheme(isDark).bg);
+      if (deviceInfo.deviceType === '2in1') return;
+      const foreground = isDark ? '#FFF2F4F2' : '#FF202628';
+      mainWindow.setWindowSystemBarProperties({
+        statusBarColor: '#00000000',
+        statusBarContentColor: foreground,
+        navigationBarColor: '#00000000',
+        navigationBarContentColor: foreground
+      }).catch((error: BusinessError) => {
+        hilog.warn(0x0, LOG_TAG, 'Unable to update system bars, code=%{public}d', error.code);
+      });
+    } catch (error) {
+      hilog.warn(0x0, LOG_TAG, 'Unable to update window theme, code=%{public}d', (error as BusinessError).code);
     }
   }
 
@@ -91,6 +111,7 @@ export default class EntryAbility extends UIAbility {
     } catch {
       this.mainWindow = undefined;
     }
+    AppStore.get().setThemeListener((isDark: boolean) => { this.applyWindowTheme(isDark); });
     try {
       windowStage.on('windowStageEvent', (event: window.WindowStageEventType) => {
         hilog.info(0x0, LOG_TAG, 'Window stage event: %{public}d', event);
@@ -104,15 +125,15 @@ export default class EntryAbility extends UIAbility {
     }
     PcTrayManager.get().init(this.context, windowStage).catch(() => {});
     windowStage.loadContent(this.page).then(() => {
-      const isDark = AppStorage.get<boolean>('oopzIsDark') ?? true;
-      try {
-        this.mainWindow?.setWindowBackgroundColor(getTheme(isDark).bg);
-      } catch {
-        // ignore
-      }
+      this.applyWindowTheme(AppStorage.get<boolean>('oopzIsDark') ?? true);
     }).catch((error: BusinessError) => {
       hilog.error(0x0, LOG_TAG, 'Unable to load the test page, code=%{public}d', error.code);
     });
+  }
+
+  onWindowStageDestroy(): void {
+    AppStore.get().setThemeListener();
+    this.mainWindow = undefined;
   }
 
   onDestroy(): void {
