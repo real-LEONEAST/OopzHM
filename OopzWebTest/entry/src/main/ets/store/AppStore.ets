@@ -688,14 +688,14 @@ export class AppStore {
     return { groups: groups, channels: flat };
   }
 
-  private async requireGroupManagement(areaId: string): Promise<void> {
+  private async requireStructurePrivilege(areaId: string, privilege: string, label: string): Promise<void> {
     const detail = await this.loadAreaDetail(areaId, true);
-    if (detail.areaId !== areaId || !hasAreaPrivilege(detail, OopzPrivilege.MANAGE_GROUP)) {
-      throw new Error('缺少域权限：管理分类（MANAGE_GROUP）');
+    if (detail.areaId !== areaId || !hasAreaPrivilege(detail, privilege)) {
+      throw new Error('缺少域权限：' + label + '（' + privilege + '）');
     }
   }
 
-  private async refreshAfterGroupChange(areaId: string, reason: string): Promise<void> {
+  private async refreshAfterStructureChange(areaId: string, reason: string): Promise<void> {
     this.channelGroupsByArea.delete(areaId);
     this.channelsByArea.delete(areaId);
     try {
@@ -708,45 +708,42 @@ export class AppStore {
   }
 
   async createChannelGroup(areaId: string, name: string): Promise<void> {
-    await this.requireGroupManagement(areaId);
+    await this.requireStructurePrivilege(areaId, OopzPrivilege.MANAGE_GROUP, '管理分类');
     await this.admin.createChannelGroup(areaId, name);
-    await this.refreshAfterGroupChange(areaId, 'group_create');
+    await this.refreshAfterStructureChange(areaId, 'group_create');
   }
 
   async renameChannelGroup(areaId: string, groupId: string, name: string): Promise<void> {
-    await this.requireGroupManagement(areaId);
+    await this.requireStructurePrivilege(areaId, OopzPrivilege.MANAGE_GROUP, '管理分类');
     await this.admin.renameChannelGroup(areaId, groupId, name);
-    await this.refreshAfterGroupChange(areaId, 'group_update');
+    await this.refreshAfterStructureChange(areaId, 'group_update');
   }
 
   async deleteChannelGroup(areaId: string, groupId: string): Promise<void> {
-    await this.requireGroupManagement(areaId);
+    await this.requireStructurePrivilege(areaId, OopzPrivilege.MANAGE_GROUP, '管理分类');
     await this.admin.deleteChannelGroup(areaId, groupId);
-    await this.refreshAfterGroupChange(areaId, 'group_delete');
+    await this.refreshAfterStructureChange(areaId, 'group_delete');
   }
 
   async createChannel(options: CreateChannelOptions): Promise<CreateChannelResult> {
-    this.assertAreaPrivilege(options.areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
+    await this.requireStructurePrivilege(options.areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
     const created = await this.admin.createChannel(options);
-    await this.loadChannelGroups(options.areaId);
-    this.areaAdminListener?.(options.areaId, 'channel_create');
+    await this.refreshAfterStructureChange(options.areaId, 'channel_create');
     return created;
   }
 
   async editChannel(options: EditChannelOptions): Promise<void> {
-    this.assertAreaPrivilege(options.areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
+    await this.requireStructurePrivilege(options.areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
     await this.admin.editChannel(options);
-    await this.loadChannelGroups(options.areaId);
-    this.areaAdminListener?.(options.areaId, 'channel_update');
+    await this.refreshAfterStructureChange(options.areaId, 'channel_update');
   }
 
   async deleteChannel(areaId: string, channelId: string): Promise<void> {
-    this.assertAreaPrivilege(areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
+    await this.requireStructurePrivilege(areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
     await this.admin.deleteChannel(areaId, channelId);
     this.messagesByChannel.delete(channelId);
     this.membersByChannel.delete(channelId);
-    await this.loadChannelGroups(areaId);
-    this.areaAdminListener?.(areaId, 'channel_delete');
+    await this.refreshAfterStructureChange(areaId, 'channel_delete');
   }
 
   async recallChannelMessage(areaId: string, channelId: string, messageId: string): Promise<void> {
@@ -824,6 +821,7 @@ export class AppStore {
     if (event.areaId.length === 0) {
       return;
     }
+    this.areaDetailById.delete(event.areaId);
     this.loadAreaDetail(event.areaId, true).then(() => {
       this.areaAdminListener?.(event.areaId, event.kind);
     }).catch(() => {
