@@ -35,6 +35,9 @@ export interface OopzVoiceChannel {
   maxMember: number;
   voiceQuality: string;
   secret: boolean;
+  groupId?: string;
+  tag?: string;
+  isTemp?: boolean;
 }
 
 export interface OopzChannelMember {
@@ -91,38 +94,6 @@ export interface OopzCred {
   jwtToken: string;
   privateKey: string;
   appVersion: string;
-}
-
-interface LoginHeaders {
-  'Accept': string;
-  'Content-Type': string;
-  'Oopz-App-Version-Number': string;
-  'Oopz-Channel': string;
-  'Oopz-Device-Id': string;
-  'Oopz-Platform': string;
-  'Oopz-Request-Id': string;
-  'Oopz-Time': string;
-  'Oopz-Web': string;
-  'Origin': string;
-  'User-Agent': string;
-  'Oopz-Sign': string;
-}
-
-interface ApiHeaders {
-  'Accept': string;
-  'Content-Type': string;
-  'Oopz-App-Version-Number': string;
-  'Oopz-Channel': string;
-  'Oopz-Device-Id': string;
-  'Oopz-Platform': string;
-  'Oopz-Request-Id': string;
-  'Oopz-Time': string;
-  'Oopz-Web': string;
-  'Origin': string;
-  'User-Agent': string;
-  'Oopz-Sign': string;
-  'Oopz-Person': string;
-  'Oopz-Signature': string;
 }
 
 interface OopzEnvelope {
@@ -188,14 +159,23 @@ interface ChannelSettingsRaw {
 interface ChannelItem {
   id?: string | number;
   channelId?: string | number;
+  groupId?: string | number;
   name?: string;
   type?: string;
   secret?: boolean;
+  tag?: string;
+  isTemp?: boolean;
   settings?: ChannelSettingsRaw;
 }
 
 interface ChannelGroup {
+  id?: string | number;
+  groupId?: string | number;
   name?: string;
+  sort?: number;
+  system?: boolean;
+  IsEnableTemp?: boolean;
+  isEnableTemp?: boolean;
   channels?: ChannelItem[];
 }
 
@@ -475,10 +455,10 @@ export class OopzSession {
     return cred;
   }
 
-  private async makeLoginHeaders(deviceId: string, path: string, body: string): Promise<LoginHeaders> {
+  private async makeLoginHeaders(deviceId: string, path: string, body: string): Promise<Record<string, string>> {
     const time = String(Date.now());
     const signature = await rsaSignBase64(md5HexUtf8(path + body) + time);
-    return {
+    const headers: Record<string, string> = {
       'Accept': '*/*',
       'Content-Type': 'application/json;charset=utf-8',
       'Oopz-App-Version-Number': OOPZ_APP_VERSION_NUMBER,
@@ -492,13 +472,14 @@ export class OopzSession {
       'User-Agent': USER_AGENT,
       'Oopz-Sign': signature
     };
+    return headers;
   }
 
   private async makeApiHeaders(deviceId: string, personUid: string, jwt: string, path: string,
-    body: string): Promise<ApiHeaders> {
+    body: string): Promise<Record<string, string>> {
     const time = String(Date.now());
     const signature = await rsaSignBase64(md5HexUtf8(path + body) + time);
-    return {
+    const headers: Record<string, string> = {
       'Accept': '*/*',
       'Content-Type': 'application/json;charset=utf-8',
       'Oopz-App-Version-Number': OOPZ_APP_VERSION_NUMBER,
@@ -514,6 +495,7 @@ export class OopzSession {
       'Oopz-Person': personUid,
       'Oopz-Signature': jwt
     };
+    return headers;
   }
 
   private async send(path: string, method: string, body?: string): Promise<HttpResult> {
@@ -521,6 +503,45 @@ export class OopzSession {
     const header = await this.makeApiHeaders(cred.deviceId, cred.personUid, cred.jwtToken, path,
       body === undefined ? '' : body);
     return await httpSend(method, OOPZ_API_BASE + path, header, body);
+  }
+
+  async signedSend(path: string, method: string, body?: string): Promise<HttpResult> {
+    return await this.send(path, method, body);
+  }
+
+  async signedRequestJson(path: string, method: string, body?: string): Promise<Object> {
+    return await this.requestJson(path, method, body);
+  }
+
+  async signedRequestVoid(path: string, method: string, body?: string): Promise<void> {
+    const result = await this.send(path, method, body);
+    hilog.info(0x0, TAG, 'api %{public}s %{public}s -> %{public}d', method, path, result.status);
+    let parsed: Object | undefined = undefined;
+    if (result.text.length > 0) {
+      try {
+        parsed = JSON.parse(result.text) as Object;
+      } catch {
+        parsed = undefined;
+      }
+    }
+    if (result.status !== 200 && result.status !== 204) {
+      let detail = 'HTTP ' + result.status;
+      if (parsed !== undefined) {
+        const env = parsed as OopzEnvelope;
+        const msg = env.message !== undefined ? env.message : env.msg;
+        if (msg !== undefined && msg.length > 0) {
+          detail = msg;
+        }
+      }
+      throw new Error('Oopz 请求失败：' + detail);
+    }
+    if (parsed !== undefined) {
+      const envelope = parsed as OopzEnvelope;
+      if (envelope.status === false) {
+        const msg = envelope.message !== undefined ? envelope.message : envelope.msg;
+        throw new Error(msg !== undefined && msg.length > 0 ? msg : 'Oopz 拒绝了请求');
+      }
+    }
   }
 
   private async requestJson(path: string, method: string, body?: string): Promise<Object> {
@@ -660,6 +681,7 @@ export class OopzSession {
     const out: OopzVoiceChannel[] = [];
     for (const group of groups) {
       const groupName = asString(group.name);
+      const gid = asString(group.id).length > 0 ? asString(group.id) : asString(group.groupId);
       const channels = group.channels;
       if (channels === undefined) {
         continue;
@@ -676,6 +698,7 @@ export class OopzSession {
         const name = asString(channel.name);
         const maxMember = typeof channel.settings?.maxMember === 'number' ? channel.settings.maxMember : 50;
         const voiceQuality = asString(channel.settings?.voiceQuality);
+        const chGroupId = asString(channel.groupId).length > 0 ? asString(channel.groupId) : gid;
         out.push({
           channelId: channelId,
           name: name.length > 0 ? name : channelId,
@@ -683,7 +706,10 @@ export class OopzSession {
           type: chType,
           maxMember: maxMember,
           voiceQuality: voiceQuality.length > 0 ? voiceQuality : '64k',
-          secret: channel.secret === true
+          secret: channel.secret === true,
+          groupId: chGroupId,
+          tag: asString(channel.tag),
+          isTemp: channel.isTemp === true
         });
       }
     }

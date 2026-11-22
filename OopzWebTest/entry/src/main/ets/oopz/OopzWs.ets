@@ -23,11 +23,40 @@ export interface VoicePresenceChange {
   activeNum: number;
 }
 
+export interface ChannelStructureEvent {
+  eventCode: number;
+  action: 'create' | 'update' | 'delete';
+  areaId: string;
+  channelId: string;
+  name: string;
+  groupId: string;
+  rawJson: string;
+}
+
+export interface AreaOrRoleChangeEvent {
+  eventCode: number;
+  kind: 'area' | 'role';
+  areaId: string;
+  rawJson: string;
+}
+
+export interface ModerationEvent {
+  eventCode: number;
+  kind: 'voice_ban' | 'text_ban';
+  areaId: string;
+  channelId: string;
+  targetUid: string;
+  rawJson: string;
+}
+
 export interface OopzWsCallbacks {
   onStateChange?: (connected: boolean) => void;
   onVoicePresence?: (event: VoicePresenceChange) => void;
   onChatMessage?: (message: OopzChatMessage) => void;
   onMessageRecall?: (areaId: string, channelId: string, messageId: string) => void;
+  onChannelStructureChange?: (event: ChannelStructureEvent) => void;
+  onAreaOrRoleChange?: (event: AreaOrRoleChangeEvent) => void;
+  onModerationChange?: (event: ModerationEvent) => void;
 }
 
 interface WsHeaders {
@@ -120,6 +149,30 @@ interface WsRecallBody {
   channelId?: string;
   messageId?: string | number;
   id?: string | number;
+}
+
+interface WsAdminBody {
+  area?: string | number;
+  areaId?: string | number;
+  channel?: string | number;
+  channelId?: string | number;
+  id?: string | number;
+  name?: string;
+  group?: string | number;
+  groupId?: string | number;
+  person?: string | number;
+  target?: string | number;
+  uid?: string | number;
+}
+
+function asWsStr(value: string | number | undefined | null): string {
+  if (typeof value === 'string') {
+    return value as string;
+  }
+  if (typeof value === 'number') {
+    return String(value as number);
+  }
+  return '';
 }
 
 function parseWsTsMs(raw: string | number | undefined): number {
@@ -514,6 +567,64 @@ export class OopzWsClient {
         hilog.info(0x0, TAG, 'WS chat recall ch=%{public}s id=%{public}s', channelId, msgId);
         this.callbacks.onMessageRecall?.(areaId, channelId, msgId);
       }
+      return;
+    }
+
+    if (event === 25 || event === 18 || event === 13) {
+      const chBody = bodyObj as WsAdminBody;
+      const areaId = asWsStr(chBody.area).length > 0 ? asWsStr(chBody.area) : asWsStr(chBody.areaId);
+      const channelId = asWsStr(chBody.channel).length > 0
+        ? asWsStr(chBody.channel)
+        : (asWsStr(chBody.channelId).length > 0 ? asWsStr(chBody.channelId) : asWsStr(chBody.id));
+      const groupId = asWsStr(chBody.groupId).length > 0 ? asWsStr(chBody.groupId) : asWsStr(chBody.group);
+      const action: 'create' | 'update' | 'delete' = event === 25 ? 'create' : (event === 18 ? 'update' : 'delete');
+      hilog.info(0x0, TAG, 'WS channel event=%{public}d area=%{public}s ch=%{public}s raw=%{public}s',
+        event, areaId, channelId, rawText.slice(0, 260));
+      this.callbacks.onChannelStructureChange?.({
+        eventCode: event,
+        action: action,
+        areaId: areaId,
+        channelId: channelId,
+        name: asWsStr(chBody.name),
+        groupId: groupId,
+        rawJson: rawText
+      });
+      return;
+    }
+
+    if (event === 28 || event === 52) {
+      const areaBody = bodyObj as WsAdminBody;
+      const areaId = asWsStr(areaBody.area).length > 0
+        ? asWsStr(areaBody.area)
+        : (asWsStr(areaBody.areaId).length > 0 ? asWsStr(areaBody.areaId) : asWsStr(areaBody.id));
+      const kind: 'area' | 'role' = event === 28 ? 'area' : 'role';
+      hilog.info(0x0, TAG, 'WS area/role event=%{public}d area=%{public}s', event, areaId);
+      this.callbacks.onAreaOrRoleChange?.({
+        eventCode: event,
+        kind: kind,
+        areaId: areaId,
+        rawJson: rawText
+      });
+      return;
+    }
+
+    if (event === 11 || event === 12) {
+      const modBody = bodyObj as WsAdminBody;
+      const areaId = asWsStr(modBody.area).length > 0 ? asWsStr(modBody.area) : asWsStr(modBody.areaId);
+      const channelId = asWsStr(modBody.channel).length > 0 ? asWsStr(modBody.channel) : asWsStr(modBody.channelId);
+      const targetUid = asWsStr(modBody.target).length > 0
+        ? asWsStr(modBody.target)
+        : (asWsStr(modBody.person).length > 0 ? asWsStr(modBody.person) : asWsStr(modBody.uid));
+      const kind: 'voice_ban' | 'text_ban' = event === 11 ? 'voice_ban' : 'text_ban';
+      hilog.info(0x0, TAG, 'WS moderation event=%{public}d area=%{public}s target=%{public}s', event, areaId, targetUid);
+      this.callbacks.onModerationChange?.({
+        eventCode: event,
+        kind: kind,
+        areaId: areaId,
+        channelId: channelId,
+        targetUid: targetUid,
+        rawJson: rawText
+      });
     }
   }
 }
