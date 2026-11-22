@@ -778,17 +778,11 @@ export class AppStore {
     if (!cred || !cred.personUid || !messageId || !msg || (msg.areaId && msg.areaId !== areaId)) {
       throw new Error('这条消息已不可撤回');
     }
+    if (msg.senderUid !== cred.personUid) throw new Error('只能撤回自己发送的消息');
     const key = channelId + '/' + messageId;
     if (this.pendingRecalls.has(key)) throw new Error('正在撤回消息');
     this.pendingRecalls.set(key, cred);
     try {
-      if (msg.senderUid !== cred.personUid) {
-        const detail = await this.loadAreaDetail(areaId, true);
-        if (detail.areaId !== areaId || !hasAreaPrivilege(detail, OopzPrivilege.RECALL_MESSAGE)) {
-          throw new Error('缺少撤回其他成员消息的权限');
-        }
-      }
-      if (this.session.getCred() !== cred) throw new Error('Oopz 会话已切换');
       if (this.recalledIds.get(channelId)?.has(messageId)) return;
       await this.admin.recallMessage(areaId, channelId, messageId);
       if (this.session.getCred() === cred) this.handleMessageRecall(areaId, channelId, messageId);

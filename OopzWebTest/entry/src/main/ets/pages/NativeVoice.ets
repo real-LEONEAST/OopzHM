@@ -23,7 +23,6 @@ import { BottomBar, BOTTOM_BAR_INSET } from '../components/BottomBar';
 import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
 import { ChatMessageItem, ChatMessageRow, ChatRecallOverlay, ChatTextRun } from '../components/ChatMessageRow';
 import { ChatImagePreview } from '../components/ChatImagePreview';
-import { OopzPrivilege } from '../oopz/OopzAreaAdmin';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
 import { VoiceOutputPicker } from '../components/VoiceDevices';
 import { AppSpacing, getTheme, nativePopupMaterial } from '../common/Theme';
@@ -333,7 +332,6 @@ struct NativeVoice {
   @State private previewImage?: OopzChatAttachment = undefined;
   @State private recallConfirming: boolean = false;
   @State private recallBusy: boolean = false;
-  @State private canRecallOthers: boolean = false;
   private menuX: number = 0;
   private menuY: number = 0;
   private actionMessageId: string = '';
@@ -342,6 +340,8 @@ struct NativeVoice {
   private actionChannel: string = '';
   private actionArea: string = '';
   private chatInteraction: number = 0;
+  @State private chatAtEnd: boolean = true;
+  private chatLoadVersion: number = 0;
   private chatFirstVisible: number = 0;
   private chatLastVisible: number = 0;
   private anchors: ChatAnchor[] = [];
@@ -451,7 +451,7 @@ struct NativeVoice {
           if (change === 'recall' && messageId === this.actionMessageId) this.closeChatAction();
           return;
         }
-        this.syncChatMessages(change === 'append' && this.chatLastVisible >= this.chatMessages.length - 1);
+        this.syncChatMessages(change === 'append' && this.chatAtEnd);
       }
     });
     this.store.setAreaAdminListener((areaId: string, reason: string) => {
@@ -459,8 +459,6 @@ struct NativeVoice {
       if (reason === 'area' || reason === 'role') {
         this.adminPermissionRead++;
         this.canManageArea = canOpenAreaAdmin(this.store.getAreaDetail(areaId));
-        this.canRecallOthers = this.store.hasAreaPrivilege(areaId, OopzPrivilege.RECALL_MESSAGE);
-        if (this.recallItem && !this.recallItem.isSelf && !this.canRecallOthers) this.closeChatAction();
         if (!this.canManageArea) this.areaAdminOpen = false;
       } else if (reason.startsWith('group_') || reason.startsWith('channel_')) {
         this.syncAdminChannels(areaId);
@@ -658,6 +656,10 @@ struct NativeVoice {
 
   private isWide(): boolean {
     return this.pageWidth >= (this.isPc ? PC_CHANNEL_BREAKPOINT_VP : WIDE_BREAKPOINT_VP);
+  }
+
+  private mobileBottomBarInset(): number {
+    return this.mobilePane === 'room' && this.selectedChannelObj?.type === 'TEXT' ? 0 : BOTTOM_BAR_INSET;
   }
 
   private showsDesktopDomainRail(): boolean {
@@ -894,10 +896,7 @@ struct NativeVoice {
     if (areaId.length === 0) return;
     this.rememberChannelPosition();
     this.emojiPickerOpen = false;
-    if (this.selectedAreaId !== areaId) {
-      this.canManageArea = false;
-      this.canRecallOthers = false;
-    }
+    if (this.selectedAreaId !== areaId) this.canManageArea = false;
     this.closeChatAction(false);
     this.areaAdminOpen = false;
     if (advanceMobile) this.mobilePane = 'channels';
@@ -961,16 +960,17 @@ struct NativeVoice {
     if (areaId.length === 0 || ch === undefined || ch.type !== 'TEXT' || this.loadingChat) {
       return;
     }
+    const request = ++this.chatLoadVersion;
     this.loadingChat = true;
     try {
       await this.store.loadChannelMessages(areaId, ch.channelId, before);
-      if (this.selectedChannelId === ch.channelId) {
+      if (request === this.chatLoadVersion && this.selectedChannelId === ch.channelId) {
         this.syncChatMessages(before === undefined && interaction === this.chatInteraction);
       }
     } catch (error) {
-      this.notice = (error as Error).message;
+      if (request === this.chatLoadVersion) this.notice = (error as Error).message;
     } finally {
-      this.loadingChat = false;
+      if (request === this.chatLoadVersion) this.loadingChat = false;
     }
   }
 
@@ -994,13 +994,17 @@ struct NativeVoice {
     }
     this.sendingChat = true;
     const draft = this.chatInput;
+    const interaction = this.chatInteraction;
     this.notice = '';
     try {
       await this.store.sendChannelMessage(areaId, ch.channelId, text);
-      if (this.chatInput === draft && this.selectedChannelId === ch.channelId) this.chatInput = '';
-      this.syncChatMessages(true);
+      if (this.selectedAreaId !== areaId || this.selectedChannelId !== ch.channelId) return;
+      if (this.chatInput === draft) this.chatInput = '';
+      this.syncChatMessages(interaction === this.chatInteraction);
     } catch (error) {
-      this.notice = (error as Error).message;
+      if (this.selectedAreaId === areaId && this.selectedChannelId === ch.channelId) {
+        this.notice = (error as Error).message;
+      }
     } finally {
       this.sendingChat = false;
     }
@@ -1044,12 +1048,23 @@ struct NativeVoice {
       setTimeout(() => {
         if (interaction !== this.chatInteraction || this.selectedChannelId !== chId || !this.activePage) return;
         try {
-          this.chatScroller.scrollToIndex(items.length - 1, false, ScrollAlign.END);
+          this.chatScroller.scrollEdge(Edge.Bottom);
         } catch {
           // ignore if not attached yet
         }
       }, 60);
     }
+  }
+
+  private updateChatEnd(): void {
+    this.chatAtEnd = this.chatMessages.length === 0 || this.chatScroller.isAtEnd();
+  }
+
+  private jumpToChatEnd(): void {
+    if (!this.chatMessages.length || this.hasChatAction()) return;
+    this.chatInteraction++;
+    this.chatScroller.scrollEdge(Edge.Bottom);
+    this.updateChatEnd();
   }
 
   private hasChatAction(): boolean {
@@ -1071,7 +1086,7 @@ struct NativeVoice {
   }
 
   private openRecallMenu(msg: ChatMessageItem, x: number, y: number): void {
-    if (this.hasChatAction() || !msg.messageId || (!msg.isSelf && !this.canRecallOthers)) return;
+    if (this.hasChatAction() || !msg.messageId || !msg.isSelf) return;
     this.beginChatAction(msg);
     this.menuX = x;
     this.menuY = y;
@@ -1169,17 +1184,14 @@ struct NativeVoice {
   private async refreshAdminPermission(areaId: string): Promise<void> {
     const read = ++this.adminPermissionRead;
     let allowed = false;
-    let recallOthers = false;
     try {
       const detail = await this.store.loadAreaDetail(areaId, true);
       allowed = detail.areaId === areaId && canOpenAreaAdmin(detail);
-      recallOthers = detail.areaId === areaId && this.store.hasAreaPrivilege(areaId, OopzPrivilege.RECALL_MESSAGE);
     } catch {
       // Browsing the area remains available when its management permissions cannot be read.
     }
     if (this.activePage && this.selectedAreaId === areaId && read === this.adminPermissionRead) {
       this.canManageArea = allowed;
-      this.canRecallOthers = recallOthers;
       if (!allowed) this.areaAdminOpen = false;
     }
   }
@@ -1202,9 +1214,19 @@ struct NativeVoice {
   }
 
   private syncViewModels(): void {
+    const previousChannel = this.selectedChannelObj?.channelId;
     this.selectedAreaObj = this.areas.find((a: OopzArea): boolean => a.areaId === this.selectedAreaId);
     const channels = this.store.channelsByArea.get(this.selectedAreaId) ?? [];
     this.selectedChannelObj = channels.find((c: OopzVoiceChannel): boolean => c.channelId === this.selectedChannelId);
+    if (previousChannel !== this.selectedChannelObj?.channelId) {
+      this.chatInteraction++;
+      this.chatLoadVersion++;
+      this.loadingChat = false;
+      this.chatAtEnd = true;
+      this.chatFirstVisible = 0;
+      this.chatLastVisible = 0;
+      this.chatMessages = [];
+    }
 
     const cards: ChannelCard[] = [];
     const darkFlag = this.isDark;
@@ -2460,7 +2482,7 @@ struct NativeVoice {
         }, (area: OopzArea) => area.areaId)
       }
       .width('100%')
-      .padding({ top: 8, bottom: 10 + BOTTOM_BAR_INSET })
+      .padding({ top: 8, bottom: 10 + this.mobileBottomBarInset() })
     }
     .scrollBar(BarState.Off)
     .width(MOBILE_DOMAIN_RAIL_WIDTH)
@@ -2605,7 +2627,7 @@ struct NativeVoice {
       .width('100%')
       .alignItems(HorizontalAlign.Start)
       .padding({
-        left: MOBILE_CHANNEL_PADDING, right: MOBILE_CHANNEL_PADDING, top: 8, bottom: 12 + BOTTOM_BAR_INSET
+        left: MOBILE_CHANNEL_PADDING, right: MOBILE_CHANNEL_PADDING, top: 8, bottom: 12 + this.mobileBottomBarInset()
       })
     }
     .scrollBar(BarState.Off)
@@ -2688,33 +2710,51 @@ struct NativeVoice {
         .layoutWeight(1)
         .justifyContent(FlexAlign.Center)
       } else {
-        List({ scroller: this.chatScroller, space: 8 }) {
-          ForEach(this.chatMessages, (msg: ChatMessageItem) => {
-            ListItem() {
-              ChatMessageRow({
-                item: msg, isDark: this.isDark, oopzEmojiFontReady: this.oopzEmojiFontReady, isDesktop: this.isPc,
-                canRecall: msg.messageId.length > 0 && (msg.isSelf || this.canRecallOthers),
-                onRecallMenu: (item: ChatMessageItem, x: number, y: number) => { this.openRecallMenu(item, x, y); },
-                onPreview: (image: OopzChatAttachment) => { this.openChatImage(msg, image); }
+        Stack({ alignContent: Alignment.BottomEnd }) {
+          List({ scroller: this.chatScroller, space: 8 }) {
+            ForEach(this.chatMessages, (msg: ChatMessageItem) => {
+              ListItem() {
+                ChatMessageRow({
+                  item: msg, isDark: this.isDark, oopzEmojiFontReady: this.oopzEmojiFontReady, isDesktop: this.isPc,
+                  canRecall: msg.isSelf && msg.messageId.length > 0,
+                  onRecallMenu: (item: ChatMessageItem, x: number, y: number) => { this.openRecallMenu(item, x, y); },
+                  onPreview: (image: OopzChatAttachment) => { this.openChatImage(msg, image); }
+                })
+              }
+              .onAreaChange(() => {
+                if (this.chatMessages[this.chatMessages.length - 1]?.key === msg.key) this.updateChatEnd();
               })
-            }
-          }, (msg: ChatMessageItem) => `${msg.key}_${this.isDark ? 1 : 0}_${msg.textRuns.length > 0 && this.oopzEmojiFontReady}`)
-        }
-        .width('100%')
-        .layoutWeight(1)
-        .maintainVisibleContentPosition(true)
-        .onScrollIndex((first: number, last: number) => {
-          this.chatFirstVisible = first;
-          this.chatLastVisible = last;
-        })
-        .padding({ left: 4, right: 4, top: 4, bottom: 4 })
+            }, (msg: ChatMessageItem) => `${msg.key}_${this.isDark ? 1 : 0}_${msg.textRuns.length > 0 && this.oopzEmojiFontReady}`)
+          }
+          .width('100%')
+          .height('100%')
+          .maintainVisibleContentPosition(true)
+          .onScrollIndex((first: number, last: number) => {
+            this.chatFirstVisible = first;
+            this.chatLastVisible = last;
+            this.updateChatEnd();
+          })
+          .onWillScroll((offset: number, _state: ScrollState, source: ScrollSource) => {
+            if (offset !== 0 && !this.hasChatAction() && (source === ScrollSource.DRAG ||
+              source === ScrollSource.OTHER_USER_INPUT || source === ScrollSource.SCROLL_BAR ||
+              source === ScrollSource.FLING || source === ScrollSource.SCROLL_BAR_FLING)) this.chatInteraction++;
+          })
+          .onDidScroll(() => { this.updateChatEnd(); })
+          .onAreaChange(() => { this.updateChatEnd(); })
+          .padding(4)
+          if (!this.chatAtEnd) {
+            Button('回到最底部').height(40).fontSize(13).padding({ left: 14, right: 14 })
+              .fontColor(getTheme(this.isDark).accent).backgroundColor(getTheme(this.isDark).surfaceSolid)
+              .border({ width: 1, color: getTheme(this.isDark).border }).margin({ right: 8, bottom: 8 })
+              .onClick(() => { this.jumpToChatEnd(); })
+          }
+        }.width('100%').layoutWeight(1)
       }
 
       if (this.notice.length > 0) {
         Text(this.notice).fontSize(12).fontColor(getTheme(this.isDark).warn)
       }
 
-      // Composer input bar positioned cleanly above BottomBar
       Row({ space: 8 }) {
         TextInput({
           placeholder: `发消息到 #${this.selectedChannelObj?.name ?? '频道'}`,
@@ -2766,7 +2806,7 @@ struct NativeVoice {
       left: 16,
       right: 16,
       top: 14,
-      bottom: 8 + (this.isPc ? 0 : BOTTOM_BAR_INSET)
+      bottom: 8
     })
   }
 
@@ -3163,12 +3203,14 @@ struct NativeVoice {
       .width('100%')
       .height('100%')
 
-      BottomBar({
-        active: this.mobilePane === 'account' ? 'account' : 'voice',
-        showMiniBar: false,
-        onNavigate: (tab: string) => { this.switchMobileTab(tab); },
-        onReturnRoom: () => { this.jumpToActiveRoom(); }
-      })
+      if (this.mobileBottomBarInset() > 0) {
+        BottomBar({
+          active: this.mobilePane === 'account' ? 'account' : 'voice',
+          showMiniBar: false,
+          onNavigate: (tab: string) => { this.switchMobileTab(tab); },
+          onReturnRoom: () => { this.jumpToActiveRoom(); }
+        })
+      }
     }
     .width('100%')
     .height('100%')

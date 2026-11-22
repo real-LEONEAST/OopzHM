@@ -35,9 +35,29 @@ export struct ChatMessageRow {
   @Prop canRecall: boolean = false;
   onRecallMenu: (item: ChatMessageItem, windowX: number, windowY: number) => void = () => {};
   onPreview: (att: OopzChatAttachment) => void = () => {};
+  private readonly textController: TextController = new TextController();
+  private selectionMenuTimer: number = -1;
+
+  aboutToDisappear(): void { clearTimeout(this.selectionMenuTimer); }
+
+  private allowsRecall(): boolean {
+    return this.canRecall && this.item.isSelf && this.item.messageId.length > 0;
+  }
+
+  private readonly textMenu: EditMenuOptions = {
+    onCreateMenu: (items: TextMenuItem[]): TextMenuItem[] => {
+      if (!this.isDesktop || !this.allowsRecall()) return items;
+      // ArkUI creates a dismissible selection overlay even for an empty item list.
+      // Release it after creation so the first click reaches the message action.
+      clearTimeout(this.selectionMenuTimer);
+      this.selectionMenuTimer = setTimeout(() => { this.textController.closeSelectionMenu(); }, 0);
+      return [];
+    },
+    onMenuItemClick: (_item: TextMenuItem, _range: TextRange): boolean => false
+  };
 
   private handleMouse(event: MouseEvent): void {
-    if (this.isDesktop && this.canRecall && event.button === MouseButton.Right && event.action === MouseAction.Press) {
+    if (this.isDesktop && this.allowsRecall() && event.button === MouseButton.Right && event.action === MouseAction.Press) {
       event.stopPropagation();
       this.onRecallMenu(this.item, event.windowX, event.windowY);
     }
@@ -45,7 +65,7 @@ export struct ChatMessageRow {
 
   @Builder
   private textBubble() {
-    Text() {
+    Text(undefined, { controller: this.textController }) {
       if (this.item.textRuns.length === 0) {
         Span(this.item.cleanText)
       } else {
@@ -61,7 +81,8 @@ export struct ChatMessageRow {
       .fontSize(14)
       .fontColor(getTheme(this.isDark).text)
       .lineHeight(this.item.textRuns.length > 0 ? 27 : 20)
-      .copyOption(!this.isDesktop && this.canRecall ? CopyOptions.None : CopyOptions.InApp)
+      .copyOption(!this.isDesktop && this.allowsRecall() ? CopyOptions.None : CopyOptions.InApp)
+      .editMenuOptions(this.textMenu)
       .onMouse((event: MouseEvent) => { this.handleMouse(event); })
       .padding({ left: 12, right: 12, top: 8, bottom: 8 })
       .borderRadius(AppSpacing.radiusSm)
@@ -82,7 +103,7 @@ export struct ChatMessageRow {
 
   @Builder
   private attachment(att: OopzChatAttachment) {
-    if (!this.isDesktop && this.canRecall) {
+    if (!this.isDesktop && this.allowsRecall()) {
       Stack() { this.thumbnail(att) }
         .gesture(GestureGroup(GestureMode.Exclusive,
           LongPressGesture({ duration: 470 }).onAction(() => { this.onRecallMenu(this.item, 0, 0); }),
@@ -139,7 +160,7 @@ export struct ChatMessageRow {
         }
 
         if (this.item.cleanText.length > 0) {
-          if (!this.isDesktop && this.canRecall) {
+          if (!this.isDesktop && this.allowsRecall()) {
             Stack() { this.textBubble() }
               .gesture(LongPressGesture({ duration: 470 }).onAction(() => { this.onRecallMenu(this.item, 0, 0); }))
           } else {
