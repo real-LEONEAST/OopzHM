@@ -9,7 +9,13 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { resolveIsDark } from '../common/Theme';
 import { OopzSession } from '../oopz/OopzSession';
 import { OopzCredStore } from '../oopz/OopzCredStore';
-import { OopzWsClient, VoicePresenceChange } from '../oopz/OopzWs';
+import {
+  AreaOrRoleChangeEvent, ChannelStructureEvent, ModerationEvent, OopzWsClient, VoicePresenceChange
+} from '../oopz/OopzWs';
+import {
+  CreateChannelOptions, CreateChannelResult, EditChannelOptions, hasAreaPrivilege, OopzAreaAdmin, OopzAreaDetail,
+  OopzChannelGroup, OopzPrivilege
+} from '../oopz/OopzAreaAdmin';
 import type {
   OopzArea, OopzChannelMember, OopzChatMessage, OopzCred, OopzPersonInfo, OopzVoiceChannel
 } from '../oopz/OopzSession';
@@ -20,6 +26,12 @@ const GRIP_STABILITY_MS: number = 500;
 
 export type PresenceListener = (areaId: string, channelId: string) => void;
 export type ChatListener = (channelId: string) => void;
+export type AreaAdminListener = (areaId: string, reason: string) => void;
+
+interface AreaChannels {
+  groups: OopzChannelGroup[];
+  channels: OopzVoiceChannel[];
+}
 
 export const DEFAULT_MIC_GAIN = 100;
 export const MAX_MIC_GAIN = 150;
@@ -37,11 +49,17 @@ export class AppStore {
   }
 
   readonly session: OopzSession = new OopzSession();
+  readonly admin: OopzAreaAdmin = new OopzAreaAdmin(this.session);
   readonly ws: OopzWsClient = new OopzWsClient();
   selfProfile?: OopzPersonInfo;
   areas: OopzArea[] = [];
   channels: OopzVoiceChannel[] = [];
   readonly channelsByArea: Map<string, OopzVoiceChannel[]> = new Map<string, OopzVoiceChannel[]>();
+  readonly areaDetailById: Map<string, OopzAreaDetail> = new Map<string, OopzAreaDetail>();
+  readonly channelGroupsByArea: Map<string, OopzChannelGroup[]> = new Map<string, OopzChannelGroup[]>();
+  private selectedChannelArea: string = '';
+  private channelReadSequence: number = 0;
+  private readonly latestChannelRead: Map<string, number> = new Map<string, number>();
   readonly membersByChannel: Map<string, OopzChannelMember[]> = new Map<string, OopzChannelMember[]>();
   readonly messagesByChannel: Map<string, OopzChatMessage[]> = new Map<string, OopzChatMessage[]>();
   readonly personByUid: Map<string, OopzPersonInfo> = new Map<string, OopzPersonInfo>();
@@ -50,6 +68,7 @@ export class AppStore {
   private credStore?: OopzCredStore;
   private presenceListener?: PresenceListener;
   private chatListener?: ChatListener;
+  private areaAdminListener?: AreaAdminListener;
   private themeListener?: (isDark: boolean) => void;
   private prefsLoaded: boolean = false;
   private foreground: boolean = false;
@@ -119,6 +138,15 @@ export class AppStore {
       },
       onMessageRecall: (areaId: string, channelId: string, messageId: string) => {
         this.handleMessageRecall(areaId, channelId, messageId);
+      },
+      onChannelStructureChange: (event: ChannelStructureEvent) => {
+        this.handleChannelStructureChange(event);
+      },
+      onAreaOrRoleChange: (event: AreaOrRoleChangeEvent) => {
+        this.handleAreaOrRoleChange(event);
+      },
+      onModerationChange: (event: ModerationEvent) => {
+        this.handleModerationChange(event);
       }
     });
   }
@@ -384,6 +412,10 @@ export class AppStore {
     this.areas = [];
     this.channels = [];
     this.channelsByArea.clear();
+    this.selectedChannelArea = '';
+    this.latestChannelRead.clear();
+    this.areaDetailById.clear();
+    this.channelGroupsByArea.clear();
     this.membersByChannel.clear();
     this.messagesByChannel.clear();
     this.personByUid.clear();
@@ -442,13 +474,8 @@ export class AppStore {
   }
 
   async loadChannels(areaId: string): Promise<OopzVoiceChannel[]> {
-    const channels = await this.session.channels(areaId);
-    this.channels = channels;
-    this.channelsByArea.set(areaId, channels);
-    const voiceChannels = channels.filter((c: OopzVoiceChannel): boolean =>
-      c.type === 'VOICE' || c.type === 'AUDIO');
-    await this.loadAreaPresence(areaId, voiceChannels);
-    return channels;
+    this.selectedChannelArea = areaId;
+    return (await this.readAreaChannels(areaId)).channels;
   }
 
   async loadAreaPresence(areaId: string, channels: OopzVoiceChannel[]): Promise<void> {
@@ -596,6 +623,217 @@ export class AppStore {
       }
     } catch {
       // keep optimistic update
+    }
+  }
+
+  setAreaAdminListener(listener?: AreaAdminListener): void {
+    this.areaAdminListener = listener;
+  }
+
+  getAreaDetail(areaId: string): OopzAreaDetail | undefined {
+    return this.areaDetailById.get(areaId);
+  }
+
+  hasAreaPrivilege(areaId: string, privilege: string): boolean {
+    return hasAreaPrivilege(this.areaDetailById.get(areaId), privilege);
+  }
+
+  private assertAreaPrivilege(areaId: string, privilege: string, label: string): void {
+    const detail = this.areaDetailById.get(areaId);
+    if (detail !== undefined && !hasAreaPrivilege(detail, privilege)) {
+      throw new Error('缺少域权限：' + label + '（' + privilege + '）');
+    }
+  }
+
+  async loadAreaDetail(areaId: string, forceRefresh: boolean = false): Promise<OopzAreaDetail> {
+    if (!forceRefresh) {
+      const cached = this.areaDetailById.get(areaId);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
+    const cred = this.session.getCred();
+    const detail = await this.admin.getAreaDetail(areaId);
+    if (this.session.getCred() !== cred) {
+      throw new Error('Oopz 会话已切换');
+    }
+    this.areaDetailById.set(areaId, detail);
+    return detail;
+  }
+
+  async loadChannelGroups(areaId: string): Promise<OopzChannelGroup[]> {
+    return (await this.readAreaChannels(areaId)).groups;
+  }
+
+  private async readAreaChannels(areaId: string): Promise<AreaChannels> {
+    const sequence = ++this.channelReadSequence;
+    this.latestChannelRead.set(areaId, sequence);
+    const groups = await this.admin.getChannelGroups(areaId);
+    const flat: OopzVoiceChannel[] = [];
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      for (let j = 0; j < g.channels.length; j++) {
+        const ch = g.channels[j];
+        if (ch.type === 'VOICE' || ch.type === 'AUDIO' || ch.type === 'TEXT') {
+          flat.push(ch);
+        }
+      }
+    }
+    if (this.latestChannelRead.get(areaId) === sequence) {
+      this.channelGroupsByArea.set(areaId, groups);
+      this.channelsByArea.set(areaId, flat);
+      if (areaId === this.selectedChannelArea) this.channels = flat;
+      await this.loadAreaPresence(areaId, flat);
+    }
+    return { groups: groups, channels: flat };
+  }
+
+  private async requireGroupManagement(areaId: string): Promise<void> {
+    const detail = await this.loadAreaDetail(areaId, true);
+    if (detail.areaId !== areaId || !hasAreaPrivilege(detail, OopzPrivilege.MANAGE_GROUP)) {
+      throw new Error('缺少域权限：管理分类（MANAGE_GROUP）');
+    }
+  }
+
+  private async refreshAfterGroupChange(areaId: string, reason: string): Promise<void> {
+    this.channelGroupsByArea.delete(areaId);
+    this.channelsByArea.delete(areaId);
+    try {
+      await this.loadChannelGroups(areaId);
+    } catch {
+      // The write already succeeded. A later list read can retry without repeating it.
+      hilog.warn(0x0, TAG, 'Unable to reload groups after %{public}s', reason);
+    }
+    this.areaAdminListener?.(areaId, reason);
+  }
+
+  async createChannelGroup(areaId: string, name: string): Promise<void> {
+    await this.requireGroupManagement(areaId);
+    await this.admin.createChannelGroup(areaId, name);
+    await this.refreshAfterGroupChange(areaId, 'group_create');
+  }
+
+  async renameChannelGroup(areaId: string, groupId: string, name: string): Promise<void> {
+    await this.requireGroupManagement(areaId);
+    await this.admin.renameChannelGroup(areaId, groupId, name);
+    await this.refreshAfterGroupChange(areaId, 'group_update');
+  }
+
+  async deleteChannelGroup(areaId: string, groupId: string): Promise<void> {
+    await this.requireGroupManagement(areaId);
+    await this.admin.deleteChannelGroup(areaId, groupId);
+    await this.refreshAfterGroupChange(areaId, 'group_delete');
+  }
+
+  async createChannel(options: CreateChannelOptions): Promise<CreateChannelResult> {
+    this.assertAreaPrivilege(options.areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
+    const created = await this.admin.createChannel(options);
+    await this.loadChannelGroups(options.areaId);
+    this.areaAdminListener?.(options.areaId, 'channel_create');
+    return created;
+  }
+
+  async editChannel(options: EditChannelOptions): Promise<void> {
+    this.assertAreaPrivilege(options.areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
+    await this.admin.editChannel(options);
+    await this.loadChannelGroups(options.areaId);
+    this.areaAdminListener?.(options.areaId, 'channel_update');
+  }
+
+  async deleteChannel(areaId: string, channelId: string): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
+    await this.admin.deleteChannel(areaId, channelId);
+    this.messagesByChannel.delete(channelId);
+    this.membersByChannel.delete(channelId);
+    await this.loadChannelGroups(areaId);
+    this.areaAdminListener?.(areaId, 'channel_delete');
+  }
+
+  async recallChannelMessage(areaId: string, channelId: string, messageId: string): Promise<void> {
+    await this.admin.recallMessage(areaId, channelId, messageId);
+    this.handleMessageRecall(areaId, channelId, messageId);
+  }
+
+  async kickFromVoiceChannel(areaId: string, channelId: string, targetUid: string): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.MOVE_VOICE, '移出语音频道');
+    await this.admin.kickFromVoiceChannel(areaId, channelId, targetUid);
+    try {
+      const map = await this.session.channelMembers(areaId, [channelId]);
+      const fresh = map.get(channelId);
+      if (fresh !== undefined) {
+        this.membersByChannel.set(channelId, fresh);
+        await this.ensurePersons(fresh.map((m: OopzChannelMember): string => m.uid));
+        this.presenceListener?.(areaId, channelId);
+      }
+    } catch {
+      // ignore optimistic refresh error
+    }
+  }
+
+  async kickFromArea(areaId: string, targetUid: string): Promise<void> {
+    const detail = this.areaDetailById.get(areaId);
+    if (detail !== undefined && !hasAreaPrivilege(detail, OopzPrivilege.MOVE_MEMBER) &&
+      !hasAreaPrivilege(detail, OopzPrivilege.BLOCK_MEMBER)) {
+      throw new Error('缺少域权限：移出域（MOVE_MEMBER / BLOCK_MEMBER）');
+    }
+    await this.admin.kickFromArea(areaId, targetUid);
+  }
+
+  async banMember(areaId: string, targetUid: string): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.BLOCK_MEMBER, '封禁成员');
+    await this.admin.banMember(areaId, targetUid);
+  }
+
+  async unbanMember(areaId: string, targetUid: string): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.BLOCK_MEMBER, '解除封禁');
+    await this.admin.unbanMember(areaId, targetUid);
+  }
+
+  async muteText(areaId: string, targetUid: string, durationSeconds: number = 300): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.DISABLE_TEXT, '文字禁言');
+    await this.admin.muteText(areaId, targetUid, durationSeconds);
+  }
+
+  async unmuteText(areaId: string, targetUid: string): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.DISABLE_TEXT, '解除文字禁言');
+    await this.admin.unmuteText(areaId, targetUid);
+  }
+
+  async muteVoice(areaId: string, targetUid: string, durationSeconds: number = 300): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.DISABLE_VOICE, '语音禁言');
+    await this.admin.muteVoice(areaId, targetUid, durationSeconds);
+  }
+
+  async unmuteVoice(areaId: string, targetUid: string): Promise<void> {
+    this.assertAreaPrivilege(areaId, OopzPrivilege.DISABLE_VOICE, '解除语音禁言');
+    await this.admin.unmuteVoice(areaId, targetUid);
+  }
+
+  private handleChannelStructureChange(event: ChannelStructureEvent): void {
+    if (event.areaId.length === 0) {
+      return;
+    }
+    this.loadChannelGroups(event.areaId).then(() => {
+      this.areaAdminListener?.(event.areaId, 'channel_' + event.action);
+    }).catch(() => {
+      this.areaAdminListener?.(event.areaId, 'channel_' + event.action);
+    });
+  }
+
+  private handleAreaOrRoleChange(event: AreaOrRoleChangeEvent): void {
+    if (event.areaId.length === 0) {
+      return;
+    }
+    this.loadAreaDetail(event.areaId, true).then(() => {
+      this.areaAdminListener?.(event.areaId, event.kind);
+    }).catch(() => {
+      this.areaAdminListener?.(event.areaId, event.kind);
+    });
+  }
+
+  private handleModerationChange(event: ModerationEvent): void {
+    if (event.areaId.length > 0) {
+      this.areaAdminListener?.(event.areaId, event.kind);
     }
   }
 }
