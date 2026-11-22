@@ -12,6 +12,7 @@ import type {
   OopzArea, OopzChannelMember, OopzChatAttachment, OopzChatMessage, OopzPersonInfo, OopzVoiceChannel
 } from '../oopz/OopzSession';
 import { rsaEncryptPassword, rsaSignBase64 } from '../oopz/OopzCrypto';
+import { ensureOopzEmojiFont, OOPZ_EMOJI_FONT_FAMILY } from '../oopz/OopzEmojiFont';
 import { extractAppId } from '../oopz/OopzToken';
 import { OOPZ_TEST_TOKEN, OOPZ_TEST_APPID } from '../oopz/OopzKeyMaterial';
 import { AppStore, DEFAULT_MIC_GAIN, MAX_MEMBER_GAIN, MAX_MIC_GAIN } from '../store/AppStore';
@@ -87,7 +88,30 @@ interface ChatMessageItem {
   isSelf: boolean;
   timeText: string;
   cleanText: string;
+  textRuns: ChatTextRun[];
   attachments: OopzChatAttachment[];
+}
+
+interface ChatTextRun {
+  text: string;
+  oopzEmoji: boolean;
+}
+
+function splitOopzEmojiRuns(text: string): ChatTextRun[] {
+  const runs: ChatTextRun[] = [];
+  let plain = '';
+  for (const character of text) {
+    const codepoint = character.codePointAt(0) ?? 0;
+    if (codepoint < 0x103200 || codepoint > 0x10320f) {
+      plain += character;
+      continue;
+    }
+    if (plain.length > 0) runs.push({ text: plain, oopzEmoji: false });
+    plain = '';
+    runs.push({ text: character, oopzEmoji: true });
+  }
+  if (runs.length > 0 && plain.length > 0) runs.push({ text: plain, oopzEmoji: false });
+  return runs;
 }
 
 function formatChatTime(tsMs: number): string {
@@ -279,6 +303,7 @@ struct MemberRow {
 struct ChatMessageRow {
   @Prop item: ChatMessageItem;
   @Prop isDark: boolean = true;
+  @Prop oopzEmojiFontReady: boolean = false;
 
   build() {
     Row({ space: 10 }) {
@@ -320,13 +345,25 @@ struct ChatMessageRow {
         }
 
         if (this.item.cleanText.length > 0) {
-          Text(this.item.cleanText)
+          Text() {
+            if (this.item.textRuns.length === 0) {
+              Span(this.item.cleanText)
+            } else {
+              ForEach(this.item.textRuns, (run: ChatTextRun) => {
+                if (run.oopzEmoji && this.oopzEmojiFontReady) {
+                  Span(run.text).fontFamily(OOPZ_EMOJI_FONT_FAMILY).fontSize(21)
+                } else {
+                  Span(run.oopzEmoji ? '[表情]' : run.text).fontSize(14)
+                }
+              }, (run: ChatTextRun, index: number) => `${index}-${run.text}-${this.oopzEmojiFontReady}`)
+            }
+          }
             .fontSize(14)
             .fontColor(getTheme(this.isDark).text)
-            .lineHeight(20)
+            .lineHeight(this.item.textRuns.length > 0 ? 27 : 20)
             .copyOption(CopyOptions.InApp)
             .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-            .borderRadius({ topLeft: 4, topRight: 14, bottomLeft: 14, bottomRight: 14 })
+            .borderRadius(AppSpacing.radiusSm)
             .backgroundColor(this.item.isSelf ? getTheme(this.isDark).tint : getTheme(this.isDark).surface)
             .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
         }
@@ -377,6 +414,7 @@ struct NativeVoice {
   @State private roomMembers: RoomMemberModel[] = [];
   @State private chatMessages: ChatMessageItem[] = [];
   @State private chatInput: string = '';
+  @State private oopzEmojiFontReady: boolean = false;
   @State private loadingChat: boolean = false;
   @State private sendingChat: boolean = false;
   @State private readingRooms: boolean = false;
@@ -1001,6 +1039,7 @@ struct NativeVoice {
       const senderName = person !== undefined ? person.name : (m.senderUid.length > 0 ? m.senderUid.slice(0, 6) : '成员');
       const senderAvatar = person !== undefined ? person.avatar : '';
       const key = m.messageId.length > 0 ? m.messageId : (m.clientMessageId.length > 0 ? m.clientMessageId : `idx_${i}`);
+      const cleanText = cleanChatContent(m.content, m.attachments.length > 0);
       items.push({
         key: key,
         messageId: m.messageId,
@@ -1009,11 +1048,19 @@ struct NativeVoice {
         senderAvatar: senderAvatar,
         isSelf: m.senderUid === selfUid && selfUid.length > 0,
         timeText: formatChatTime(m.timestampMs),
-        cleanText: cleanChatContent(m.content, m.attachments.length > 0),
+        cleanText: cleanText,
+        textRuns: splitOopzEmojiRuns(cleanText),
         attachments: m.attachments
       });
     }
     this.chatMessages = items;
+    const context = this.getAbilityContext();
+    if (!this.oopzEmojiFontReady && context !== undefined &&
+      items.some((item: ChatMessageItem) => item.textRuns.length > 0)) {
+      ensureOopzEmojiFont(context).then((ready: boolean) => {
+        if (this.activePage && ready) this.oopzEmojiFontReady = true;
+      }).catch(() => {});
+    }
     if (scrollToBottom && items.length > 0) {
       setTimeout(() => {
         try {
@@ -2531,9 +2578,9 @@ struct NativeVoice {
         List({ scroller: this.chatScroller, space: 8 }) {
           ForEach(this.chatMessages, (msg: ChatMessageItem) => {
             ListItem() {
-              ChatMessageRow({ item: msg, isDark: this.isDark })
+              ChatMessageRow({ item: msg, isDark: this.isDark, oopzEmojiFontReady: this.oopzEmojiFontReady })
             }
-          }, (msg: ChatMessageItem) => `${msg.key}_${this.isDark ? 1 : 0}`)
+          }, (msg: ChatMessageItem) => `${msg.key}_${this.isDark ? 1 : 0}_${msg.textRuns.length > 0 && this.oopzEmojiFontReady}`)
         }
         .width('100%')
         .layoutWeight(1)

@@ -68,12 +68,9 @@ export struct ChatEmojiPicker {
 
   build() {
     Button({ type: ButtonType.Normal }) {
-      Path({ width: 22, height: 22,
-        commands: 'M11 2.5 A8.5 8.5 0 1 1 11 19.5 A8.5 8.5 0 1 1 11 2.5 Z M7.5 8.5 H8 M14 8.5 H14.5 M7.5 12.5 Q11 16.5 14.5 12.5' })
-        .fill(Color.Transparent)
-        .stroke(this.isOpen ? getTheme(this.isDark).accent : getTheme(this.isDark).text)
-        .strokeWidth(1.6)
-        .strokeLineCap(LineCapStyle.Round)
+      SymbolGlyph(this.isOpen ? $r('sys.symbol.face_smiling_fill') : $r('sys.symbol.face_smiling'))
+        .fontSize(21)
+        .fontColor([this.isOpen ? getTheme(this.isDark).accent : getTheme(this.isDark).textSecondary])
     }
     .width(44)
     .height(42)
@@ -85,9 +82,11 @@ export struct ChatEmojiPicker {
     .bindPopup(this.isOpen, {
       builder: () => { this.emojiPalette(); },
       placement: Placement.Top,
+      targetSpace: 8,
       enableArrow: false,
+      radius: 16,
       backgroundBlurStyle: BlurStyle.NONE,
-      popupColor: Color.Transparent,
+      popupColor: getTheme(this.isDark).surfaceSolid,
       onStateChange: (event) => {
         if (!event.isVisible) {
           this.isOpen = false;
