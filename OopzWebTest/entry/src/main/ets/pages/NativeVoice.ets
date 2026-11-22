@@ -2041,7 +2041,7 @@ struct NativeVoice {
             .fontSize(18)
             .fontColor([this.muted ? getTheme(this.isDark).accent : getTheme(this.isDark).text])
         }
-        .width(35)
+        .width(this.isPc ? 35 : 50)
         .height(42)
         .padding(0)
         .borderRadius(AppSpacing.radiusSm)
@@ -2050,8 +2050,10 @@ struct NativeVoice {
         .enabled(this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING)
         .hoverEffect(HoverEffect.Highlight)
         .onClick(() => { this.toggleMicrophone(); })
-        Divider().vertical(true).height(15).color(getTheme(this.isDark).borderSubtle)
-        this.inputDevicePicker()
+        if (this.isPc) {
+          Divider().vertical(true).height(15).color(getTheme(this.isDark).borderSubtle)
+          this.inputDevicePicker()
+        }
       }
       .height(42)
       .borderRadius(AppSpacing.radius)

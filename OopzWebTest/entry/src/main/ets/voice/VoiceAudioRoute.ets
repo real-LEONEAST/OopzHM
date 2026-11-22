@@ -77,7 +77,6 @@ export class VoiceAudioRoute {
   private observingCapturers: boolean = false;
   private observingOutputDevice: boolean = false;
   private observingInputDevice: boolean = false;
-  private enhanced: boolean = false;
   private selectedMediaInput: boolean = false;
   private selectingMediaInput?: Promise<void>;
   private renderersBefore?: Set<number>;
@@ -119,9 +118,6 @@ export class VoiceAudioRoute {
         this.observingCapturers = true;
       } catch {
         hilog.info(0x0, TAG, 'Capturer monitoring unavailable');
-      }
-      if (deviceInfo.apiAvailable('26.0.0') && canIUse('SystemCapability.Multimedia.Audio.DeviceEnhance')) {
-        this.enhanced = audioManager.getDeviceEnhanceManager().isEnhancedRoutingSupported();
       }
       if (deviceInfo.apiAvailable(20)) {
         this.manager.on('currentOutputDeviceChanged', this.onOutputDeviceChange);
@@ -278,8 +274,9 @@ export class VoiceAudioRoute {
     const streams = this.streamManager;
     if (this.context === undefined) return;
     const next = new VoiceRouteStatus();
+    const isPc = deviceInfo.deviceType === '2in1';
     next.pickerType = this.pickerType;
-    next.independentInput = this.enhanced && deviceInfo.apiAvailable(20) &&
+    next.independentInput = isPc && deviceInfo.apiAvailable(20) &&
       canIUse('SystemCapability.Multimedia.AVSession.AVInputCast');
     try {
       if (streams !== undefined && this.renderersBefore !== undefined) {
@@ -301,7 +298,7 @@ export class VoiceAudioRoute {
         this.lastInputSource = capturer?.capturerInfo.source ?? this.lastInputSource;
         next.source = this.lastInputSource;
         next.input = voiceDeviceName(capturer?.deviceDescriptors[0]);
-        next.mediaInput = !next.independentInput && next.source === audio.SourceType.SOURCE_TYPE_MIC &&
+        next.mediaInput = isPc && !next.independentInput && next.source === audio.SourceType.SOURCE_TYPE_MIC &&
           this.manager !== undefined && deviceInfo.apiAvailable(21);
       }
     } catch (error) {
@@ -383,7 +380,6 @@ export class VoiceAudioRoute {
     this.capturerId = undefined;
     this.lastUsage = undefined;
     this.lastInputSource = undefined;
-    this.enhanced = false;
     this.previous = new VoiceRouteStatus();
     await this.selectingMediaInput?.catch(() => {});
     if (this.selectedMediaInput) {
