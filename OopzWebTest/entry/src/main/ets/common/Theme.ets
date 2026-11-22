@@ -1,7 +1,7 @@
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { uiMaterial } from '@kit.ArkUI';
 
-// HarmonyOS immersive glass theme tokens supporting adaptive Light & Dark modes.
+// Application colors for light and dark themes.
 export interface ThemePalette {
   bg: string;
   rail: string;
@@ -121,8 +121,6 @@ export function resolveIsDark(mode: string, systemIsDark: boolean): boolean {
   return systemIsDark;
 }
 
-const MATERIAL_CACHE: Map<string, uiMaterial.Material> = new Map<string, uiMaterial.Material>();
-
 export function supportsImmersiveLight(): boolean {
   if (!deviceInfo.apiAvailable('26.0.0')) {
     return false;
@@ -134,76 +132,22 @@ export function supportsImmersiveLight(): boolean {
   }
 }
 
-// Thickness levels: 0=ULTRA_THIN, 1=THIN, 2=REGULAR, 3=THICK, 4=ULTRA_THICK.
-export function createImmersiveMaterial(thickness: number, isDark: boolean, interactive: boolean = false,
-  materialColor?: ResourceColor): uiMaterial.Material | undefined {
-  if (!supportsImmersiveLight()) {
-    return undefined;
-  }
-  const cacheKey = materialColor === undefined
-    ? `${thickness}_${isDark ? 1 : 0}_${interactive ? 1 : 0}`
-    : '';
-  if (cacheKey.length > 0) {
-    const cached = MATERIAL_CACHE.get(cacheKey);
-    if (cached !== undefined) {
-      return cached;
-    }
-  }
-  try {
-    let style = uiMaterial.ImmersiveStyle.REGULAR;
-    if (thickness === 0) {
-      style = uiMaterial.ImmersiveStyle.ULTRA_THIN;
-    } else if (thickness === 1) {
-      style = uiMaterial.ImmersiveStyle.THIN;
-    } else if (thickness === 3) {
-      style = uiMaterial.ImmersiveStyle.THICK;
-    } else if (thickness === 4) {
-      style = uiMaterial.ImmersiveStyle.ULTRA_THICK;
-    }
-    const mat = new uiMaterial.ImmersiveMaterial({
-      style: style,
-      materialColor: materialColor,
-      applyShadow: true,
-      interactive: interactive,
-      lightEffect: {
-        color: isDark ? '#42A5E4D0' : '#62FFFFFF'
-      }
-    });
-    if (cacheKey.length > 0) {
-      MATERIAL_CACHE.set(cacheKey, mat);
-    }
-    return mat;
-  } catch {
-    return undefined;
-  }
-}
+let popupMaterial: uiMaterial.Material | undefined;
 
-export class ImmersiveChrome implements AttributeModifier<CommonAttribute> {
-  private readonly enabled: boolean;
-  private readonly isDark: boolean;
-  private readonly thickness: number;
-  private readonly interactive: boolean;
-
-  constructor(enabled: boolean, isDark: boolean, thickness: number, interactive: boolean = false) {
-    this.enabled = enabled;
-    this.isDark = isDark;
-    this.thickness = thickness;
-    this.interactive = interactive;
+export function nativePopupMaterial(enabled: boolean): uiMaterial.Material | undefined {
+  if (!deviceInfo.apiAvailable('26.0.0')) return undefined;
+  if (!enabled || !supportsImmersiveLight()) return uiMaterial.Material.empty;
+  if (popupMaterial === undefined) {
+    popupMaterial = new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THICK });
   }
-
-  applyNormalAttribute(instance: CommonAttribute): void {
-    if (!this.enabled) return;
-    const material = createImmersiveMaterial(this.thickness, this.isDark, this.interactive);
-    if (material !== undefined) {
-      instance.systemMaterial(material);
-    }
-  }
+  return popupMaterial;
 }
 
 export class AppSpacing {
   static readonly page: number = 20;
   static readonly card: number = 16;
   static readonly gap: number = 14;
+  static readonly radiusLg: number = 24;
   static readonly radius: number = 16;
   static readonly radiusSm: number = 12;
   static readonly navHeight: number = 56;

@@ -1,4 +1,5 @@
 import { common } from '@kit.AbilityKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { DEFAULT_MIC_GAIN } from '../store/AppStore';
 import {
   AudioVolumeInfo, ChannelMediaOptions, Constants, IRtcEngineEventHandler, LogConfig, RtcEngine, RtcEngineConfig,
@@ -32,6 +33,8 @@ export interface RtcCallEvents {
 export class NativeRtcCall {
   private engine?: RtcEngine;
   private generation: number = 0;
+  private joinedCue: string = '';
+  private leftCue: string = '';
 
   static sdkVersion(): string {
     return RtcEngine.getSdkVersion();
@@ -113,6 +116,12 @@ export class NativeRtcCall {
         if (isCurrent()) {
           events.userMuteAudio?.(uid, muted);
         }
+      },
+      onRemoteAudioStateChanged: (uid: number, _state: Constants.RemoteAudioStreamState,
+        reason: Constants.RemoteAudioStreamReason, _elapsed: number) => {
+        if (!isCurrent()) return;
+        if (reason === Constants.RemoteAudioStreamReason.REMOTE_MUTED) events.userMuteAudio?.(uid, true);
+        if (reason === Constants.RemoteAudioStreamReason.REMOTE_UNMUTED) events.userMuteAudio?.(uid, false);
       }
     };
 
@@ -126,11 +135,12 @@ export class NativeRtcCall {
     if (audio !== 0) {
       throw new Error(`启用原生音频失败（${audio}）`);
     }
-    engine.enableAudioVolumeIndication(200, 3, true);
-    // Speech with the SDK's chat-room audio routing suits push-to-talk and open microphones.
+    engine.enableAudioVolumeIndication(200, 2, true);
     engine.setAudioProfile(Constants.AudioProfileType.SPEECH_STANDARD);
     engine.setAudioScenario(Constants.AudioScenarioType.CHATROOM);
     engine.adjustRecordingSignalVolume(micGain);
+    this.joinedCue = this.copyCue(context, 'voice-join.wav');
+    this.leftCue = this.copyCue(context, 'voice-leave.wav');
 
     const options = new ChannelMediaOptions();
     options.channelProfile = liveRoom ? Constants.ChannelProfile.LIVE_BROADCASTING :
@@ -148,6 +158,36 @@ export class NativeRtcCall {
 
   setMicrophone(enabled: boolean): number {
     return this.engine?.enableLocalAudio(enabled) ?? -1;
+  }
+
+  setSpeakerMuted(muted: boolean): number {
+    const result = this.engine?.adjustPlaybackSignalVolume(muted ? 0 : 100) ?? -1;
+    if (muted && result === 0) {
+      this.engine?.stopEffect(1);
+      this.engine?.stopEffect(2);
+    }
+    return result;
+  }
+
+  playRoomCue(joined: boolean): void {
+    const path = joined ? this.joinedCue : this.leftCue;
+    if (path.length > 0) this.engine?.playEffect(joined ? 1 : 2, path, 0, 1, 0, 42, false);
+  }
+
+  private copyCue(context: common.UIAbilityContext, name: string): string {
+    try {
+      const data = context.resourceManager.getRawFileContentSync(name);
+      const path = `${context.cacheDir}/${name}`;
+      const file = fileIo.openSync(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.WRITE_ONLY | fileIo.OpenMode.TRUNC);
+      try {
+        fileIo.writeSync(file.fd, data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+      } finally {
+        fileIo.closeSync(file);
+      }
+      return path;
+    } catch {
+      return '';
+    }
   }
 
   setUserVolume(uid: number, volume: number): number {

@@ -7,6 +7,7 @@ import { webSocket } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { OOPZ_APP_VERSION_NUMBER, OOPZ_PLATFORM } from './OopzKeyMaterial';
 import { inflateZlib } from './Inflate';
+import { normalizeChatText } from './OopzChatText';
 import type { OopzChatAttachment, OopzChatMessage, OopzCred } from './OopzSession';
 
 const TAG: string = 'OopzWs';
@@ -525,7 +526,7 @@ export class OopzWsClient {
       const sender = msgRaw.person !== undefined ? String(msgRaw.person)
         : (msgRaw.senderUid !== undefined ? String(msgRaw.senderUid)
           : (msgRaw.senderId !== undefined ? String(msgRaw.senderId) : ''));
-      const content = msgRaw.content !== undefined ? msgRaw.content : (msgRaw.text ?? '');
+      const content = normalizeChatText(msgRaw.content, msgRaw.text);
       const attachments: OopzChatAttachment[] = [];
       if (Array.isArray(msgRaw.attachments)) {
         for (const att of msgRaw.attachments) {
