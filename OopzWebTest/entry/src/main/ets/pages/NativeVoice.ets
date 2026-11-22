@@ -17,6 +17,7 @@ import { extractAppId } from '../oopz/OopzToken';
 import { OOPZ_TEST_TOKEN, OOPZ_TEST_APPID } from '../oopz/OopzKeyMaterial';
 import { AppStore, DEFAULT_MIC_GAIN, MAX_MEMBER_GAIN, MAX_MIC_GAIN } from '../store/AppStore';
 import { AccountPanel } from '../components/AccountPanel';
+import { AreaAdminPanel, canOpenAreaAdmin } from '../components/AreaAdminPanel';
 import { BottomBar, BOTTOM_BAR_INSET } from '../components/BottomBar';
 import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
@@ -415,6 +416,9 @@ struct NativeVoice {
   @State private signedIn: boolean = false;
   @State private areas: OopzArea[] = [];
   @State private selectedAreaId: string = '';
+  @State private areaAdminOpen: boolean = false;
+  @State private canManageArea: boolean = false;
+  @State private adminRevision: number = 0;
   @State private selectedChannelId: string = '';
   @State private selectedAreaObj?: OopzArea = undefined;
   @State private selectedChannelObj?: OopzVoiceChannel = undefined;
@@ -468,6 +472,8 @@ struct NativeVoice {
   private readonly voiceRoute: VoiceAudioRoute = new VoiceAudioRoute();
   private observingCancellation: boolean = false;
   private activePage: boolean = false;
+  private adminPermissionRead: number = 0;
+  private adminBack?: () => void;
   private startingTask?: Promise<void>;
   private taskAttempted: boolean = false;
   private joinTimer: number = -1;
@@ -528,6 +534,17 @@ struct NativeVoice {
         this.syncChatMessages(true);
       }
     });
+    this.store.setAreaAdminListener((areaId: string, reason: string) => {
+      if (!this.activePage || areaId !== this.selectedAreaId) return;
+      if (reason === 'area' || reason === 'role') {
+        this.adminPermissionRead++;
+        this.canManageArea = canOpenAreaAdmin(this.store.getAreaDetail(areaId));
+        if (!this.canManageArea) this.areaAdminOpen = false;
+      } else if (reason.startsWith('group_') || reason.startsWith('channel_')) {
+        this.syncAdminChannels(areaId);
+      }
+      if (this.areaAdminOpen) this.adminRevision++;
+    });
     PcTrayManager.get().setCallActionHandler((action: TrayCallAction) => {
       this.handleTrayAction(action);
     });
@@ -554,6 +571,7 @@ struct NativeVoice {
     this.store.setGripInteractionActive('voice-emoji', false);
     this.store.setPresenceListener(undefined);
     this.store.setChatListener(undefined);
+    this.store.setAreaAdminListener(undefined);
     PcTrayManager.get().setCallActionHandler(undefined);
     this.callKeepAlive();
     this.stopSpeakDecayTimer();
@@ -591,6 +609,11 @@ struct NativeVoice {
   }
 
   private backToParent(): boolean {
+    if (this.areaAdminOpen) {
+      if (this.adminBack !== undefined) this.adminBack();
+      else this.closeAreaAdmin();
+      return true;
+    }
     if (this.emojiPickerOpen) {
       this.emojiPickerOpen = false;
       return true;
@@ -910,6 +933,8 @@ struct NativeVoice {
       this.areas = areas;
       hilog.info(0x0, TAG, 'Oopz areas count=%{public}d', areas.length);
       if (areas.length === 0) {
+        this.canManageArea = false;
+        this.areaAdminOpen = false;
         this.selectedAreaId = '';
         this.selectedChannelId = '';
         this.selectedAreaObj = undefined;
@@ -942,8 +967,11 @@ struct NativeVoice {
     if (areaId.length === 0) return;
     this.rememberChannelPosition();
     this.emojiPickerOpen = false;
+    if (this.selectedAreaId !== areaId) this.canManageArea = false;
+    this.areaAdminOpen = false;
     if (advanceMobile) this.mobilePane = 'channels';
     this.selectedAreaId = areaId;
+    this.refreshAdminPermission(areaId);
     this.readingRooms = true;
     this.syncViewModels();
     try {
@@ -969,6 +997,7 @@ struct NativeVoice {
   }
 
   private selectChannel(channelId: string): void {
+    this.areaAdminOpen = false;
     this.rememberChannelPosition();
     this.emojiPickerOpen = false;
     this.selectedChannelId = channelId;
@@ -1102,12 +1131,44 @@ struct NativeVoice {
     if (!this.isInCall() || this.callAreaId.length === 0 || this.callChannelId.length === 0) {
       return;
     }
+    this.areaAdminOpen = false;
     if (this.selectedAreaId !== this.callAreaId) {
       await this.selectArea(this.callAreaId, false);
     }
     this.selectedChannelId = this.callChannelId;
     this.mobilePane = 'room';
     this.syncViewModels();
+  }
+
+  private async refreshAdminPermission(areaId: string): Promise<void> {
+    const read = ++this.adminPermissionRead;
+    let allowed = false;
+    try {
+      const detail = await this.store.loadAreaDetail(areaId, true);
+      allowed = detail.areaId === areaId && canOpenAreaAdmin(detail);
+    } catch {
+      // Browsing the area remains available when its management permissions cannot be read.
+    }
+    if (this.activePage && this.selectedAreaId === areaId && read === this.adminPermissionRead) {
+      this.canManageArea = allowed;
+      if (!allowed) this.areaAdminOpen = false;
+    }
+  }
+
+  private syncAdminChannels(areaId: string): void {
+    if (areaId !== this.selectedAreaId) return;
+    const channels = this.store.channelsByArea.get(areaId);
+    if (channels === undefined) return;
+    const selectionChanged = !channels.some((ch: OopzVoiceChannel): boolean => ch.channelId === this.selectedChannelId);
+    if (selectionChanged) {
+      this.selectedChannelId = this.pickDefaultChannel(channels);
+      this.chatInput = '';
+    }
+    this.syncViewModels();
+    if (selectionChanged) {
+      this.syncChatMessages();
+      if (this.selectedChannelObj?.type === 'TEXT') this.loadSelectedChat();
+    }
   }
 
   private syncViewModels(): void {
@@ -1821,7 +1882,10 @@ struct NativeVoice {
       ? getTheme(this.isDark).accentSoft : Color.Transparent)
     .accessibilityText(settings ? '设置' : (this.selfName.length > 0 ? `我的，${this.selfName}` : '我的'))
     .hoverEffect(HoverEffect.Highlight)
-    .onClick(() => { this.desktopPane = settings ? 'settings' : 'account'; })
+    .onClick(() => {
+      this.areaAdminOpen = false;
+      this.desktopPane = settings ? 'settings' : 'account';
+    })
   }
 
   @Builder
@@ -1924,42 +1988,82 @@ struct NativeVoice {
     .onClick(() => { this.desktopPane = 'room'; this.selectChannel(ch.channelId); })
   }
 
+  private closeAreaAdmin(): void {
+    this.areaAdminOpen = false;
+    this.adminBack = undefined;
+    if (this.isPc && !this.isWide() && this.selectedChannelObj !== undefined) this.mobilePane = 'room';
+  }
+
+  @Builder
+  private adminEntry() {
+    Button('域管理').fontSize(13).height(34).padding({ left: 10, right: 10 })
+      .fontColor(getTheme(this.isDark).accent).backgroundColor(getTheme(this.isDark).accentSoft)
+      .onClick(() => {
+        if (!this.canManageArea || this.areaAdminOpen) return;
+        if (!this.isPc) this.rememberChannelPosition();
+        this.desktopPane = 'room';
+        this.adminBack = undefined;
+        this.areaAdminOpen = true;
+      })
+  }
+
+  @Builder
+  private adminPanel() {
+    AreaAdminPanel({
+      areaId: this.selectedAreaId,
+      areaName: this.selectedAreaObj?.name ?? '',
+      isDesktop: this.isPc,
+      revision: this.adminRevision,
+      onBackHandler: (handler: () => void) => { this.adminBack = handler; },
+      onStructureChanged: (areaId: string) => { this.syncAdminChannels(areaId); },
+      onClose: () => { this.closeAreaAdmin(); }
+    })
+  }
+
+  @Builder
+  private desktopAreaTitle() {
+    if (this.showsDesktopDomainRail() || !this.isWide() || this.areas.length === 0) {
+      Text(this.selectedAreaObj?.name ?? '频道')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(getTheme(this.isDark).text)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .padding({ left: 5, right: 5, top: 7, bottom: 5 })
+    } else {
+      Button({ type: ButtonType.Normal }) {
+        Row({ space: 6 }) {
+          Text(this.selectedAreaObj?.name ?? '选择域')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(getTheme(this.isDark).text)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+          SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(13).fontColor([getTheme(this.isDark).textMuted])
+        }
+        .width('100%')
+        .padding({ left: 5, right: 5 })
+      }
+      .width('100%')
+      .height(34)
+      .padding(0)
+      .borderRadius(7)
+      .backgroundColor(Color.Transparent)
+      .accessibilityText(`${this.selectedAreaObj?.name ?? '频道'}，切换域`)
+      .hoverEffect(HoverEffect.Highlight)
+      .bindMenu(this.desktopDomainMenu())
+    }
+  }
+
   @Builder
   private desktopChannelPane() {
     Column({ space: 8 }) {
-      if (this.showsDesktopDomainRail() || !this.isWide() || this.areas.length === 0) {
-        Text(this.selectedAreaObj?.name ?? '频道')
-          .fontSize(16)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(getTheme(this.isDark).text)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .padding({ left: 5, right: 5, top: 7, bottom: 5 })
-      } else {
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 6 }) {
-            Text(this.selectedAreaObj?.name ?? '选择域')
-              .fontSize(16)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(getTheme(this.isDark).text)
-              .maxLines(1)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-              .layoutWeight(1)
-            SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(13).fontColor([getTheme(this.isDark).textMuted])
-          }
-          .width('100%')
-          .padding({ left: 5, right: 5 })
-        }
-        .width('100%')
-        .height(34)
-        .padding(0)
-        .borderRadius(7)
-        .backgroundColor(Color.Transparent)
-        .accessibilityText(`${this.selectedAreaObj?.name ?? '频道'}，切换域`)
-        .hoverEffect(HoverEffect.Highlight)
-        .bindMenu(this.desktopDomainMenu())
-      }
-
+      Row({ space: 4 }) {
+        Column() { this.desktopAreaTitle() }
+          .alignItems(HorizontalAlign.Start).layoutWeight(1)
+        if (this.canManageArea) { this.adminEntry() }
+      }.width('100%')
       if (this.channelCards.length === 0) {
         Text(this.readingRooms ? '正在读取频道…' : '暂无可浏览的频道')
           .fontSize(12)
@@ -2282,6 +2386,7 @@ struct NativeVoice {
         .fontColor(getTheme(this.isDark).text)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (this.mobilePane === 'channels' && this.canManageArea) { this.adminEntry() }
     }
     .width('100%')
     .height(50)
@@ -2925,7 +3030,9 @@ struct NativeVoice {
 
         Column() {
           Column() {
-            if (this.desktopPane !== 'room') {
+            if (this.areaAdminOpen) {
+              this.adminPanel()
+            } else if (this.desktopPane !== 'room') {
               AccountPanel({
                 embedded: true,
                 settingsFirst: this.desktopPane === 'settings',
@@ -3032,6 +3139,8 @@ struct NativeVoice {
     Column() {
       if (this.isPc) {
         this.desktopShell()
+      } else if (this.areaAdminOpen) {
+        this.adminPanel()
       } else {
         this.mobileShell()
       }
