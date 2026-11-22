@@ -311,26 +311,23 @@ interface RawCreateChannelEnvelope {
 }
 
 interface EditChannelBody {
-  area: string;
   channel: string;
   name: string;
+  textGapSecond: number;
+  area: string;
+  voiceQuality: string;
+  voiceDelay: string;
   maxMember: number;
+  voiceControlEnabled: boolean;
+  textControlEnabled: boolean;
+  textRoles: number[];
+  voiceRoles: number[];
+  accessControlEnabled: boolean;
+  accessible: number[];
+  accessibleMembers: string[];
   secret: boolean;
   hasPassword: boolean;
   password: string;
-  voiceQuality: string;
-  voiceDelay: string;
-  textGapSecond: number;
-  articleGapSecond: number;
-  commentGapSecond: number;
-  voiceControlEnabled: boolean;
-  textControlEnabled: boolean;
-  articleControlEnabled: boolean;
-  accessControlEnabled: boolean;
-  voiceRoles: number[];
-  textRoles: number[];
-  articleRoles: number[];
-  accessibleMembers: string[];
 }
 
 interface AreaTargetBody {
@@ -723,33 +720,35 @@ export class OopzAreaAdmin {
     };
   }
 
-  // Note: Live probes confirmed these EditReq keys on /area/v3/channel/setting/edit,
-  // while the server still returns ERR.000.00009 pending a 1-request web.oopz.cn payload capture.
   async editChannel(options: EditChannelOptions): Promise<void> {
     this.requireArg(options.areaId, 'areaId');
     this.requireArg(options.channelId, 'channelId');
     const current = await this.getChannelSetting(options.channelId);
+    const fallbackMax = (current.type === 'TEXT' && (current.maxMember <= 0 || current.maxMember > 30000))
+      ? 30000
+      : current.maxMember;
     const body: EditChannelBody = {
-      area: options.areaId,
       channel: options.channelId,
       name: options.name !== undefined ? options.name : current.name,
-      maxMember: options.maxMember !== undefined ? options.maxMember : current.maxMember,
-      secret: options.secret !== undefined ? options.secret : current.secret,
-      hasPassword: current.hasPassword,
-      password: current.password,
-      voiceQuality: options.voiceQuality !== undefined ? options.voiceQuality : current.voiceQuality,
-      voiceDelay: options.voiceDelay !== undefined ? options.voiceDelay : current.voiceDelay,
       textGapSecond: options.textGapSecond !== undefined ? options.textGapSecond : current.textGapSecond,
-      articleGapSecond: current.articleGapSecond,
-      commentGapSecond: current.commentGapSecond,
+      area: options.areaId,
+      voiceQuality: options.voiceQuality !== undefined
+        ? options.voiceQuality
+        : (current.voiceQuality.length > 0 ? current.voiceQuality : '64k'),
+      voiceDelay: options.voiceDelay !== undefined
+        ? options.voiceDelay
+        : (current.voiceDelay.length > 0 ? current.voiceDelay : 'LOW'),
+      maxMember: options.maxMember !== undefined ? options.maxMember : fallbackMax,
       voiceControlEnabled: current.voiceControlEnabled,
       textControlEnabled: current.textControlEnabled,
-      articleControlEnabled: current.articleControlEnabled,
-      accessControlEnabled: current.accessControlEnabled,
-      voiceRoles: current.voiceRoles,
       textRoles: current.textRoles,
-      articleRoles: current.articleRoles,
-      accessibleMembers: current.accessibleMembers
+      voiceRoles: current.voiceRoles,
+      accessControlEnabled: current.accessControlEnabled,
+      accessible: current.accessibleRoles,
+      accessibleMembers: current.accessibleMembers,
+      secret: options.secret !== undefined ? options.secret : current.secret,
+      hasPassword: current.hasPassword,
+      password: current.password
     };
     await this.session.signedRequestVoid('/area/v3/channel/setting/edit', 'POST', JSON.stringify(body));
   }
