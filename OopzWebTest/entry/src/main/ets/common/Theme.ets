@@ -1,7 +1,7 @@
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { uiMaterial } from '@kit.ArkUI';
 
-// HarmonyOS immersive glass theme tokens supporting adaptive Light & Dark modes.
+// Application colors for light and dark themes.
 export interface ThemePalette {
   bg: string;
   rail: string;
@@ -27,8 +27,6 @@ export interface ThemePalette {
   warnSoft: string;
   glass: string;
   glassStrong: string;
-  chromeTint: string;
-  chromeHighlight: string;
   glowTop: string;
   glowBottom: string;
   scrimStart: string;
@@ -64,8 +62,6 @@ export const DARK_THEME: ThemePalette = {
   warnSoft: '#3F3428',
   glass: '#D0222629',
   glassStrong: '#EB222629',
-  chromeTint: '#D82B3B36',
-  chromeHighlight: '#38BFEEE0',
   glowTop: '#22A5E4D0',
   glowBottom: '#12D8BBA0',
   scrimStart: '#EB181B1E',
@@ -101,8 +97,6 @@ export const LIGHT_THEME: ThemePalette = {
   warnSoft: '#F5EADB',
   glass: '#DEF9F8F4',
   glassStrong: '#F0FCFBF8',
-  chromeTint: '#EAF1FAF7',
-  chromeHighlight: '#DEFFFFFF',
   glowTop: '#188AC8B5',
   glowBottom: '#18DFC1A5',
   scrimStart: '#CC0F172A',
@@ -127,8 +121,6 @@ export function resolveIsDark(mode: string, systemIsDark: boolean): boolean {
   return systemIsDark;
 }
 
-const MATERIAL_CACHE: Map<string, uiMaterial.Material> = new Map<string, uiMaterial.Material>();
-
 export function supportsImmersiveLight(): boolean {
   if (!deviceInfo.apiAvailable('26.0.0')) {
     return false;
@@ -140,83 +132,15 @@ export function supportsImmersiveLight(): boolean {
   }
 }
 
-// Thickness levels: 0=ULTRA_THIN, 1=THIN, 2=REGULAR, 3=THICK, 4=ULTRA_THICK.
-export function createImmersiveMaterial(thickness: number, isDark: boolean, interactive: boolean = false,
-  materialColor?: ResourceColor): uiMaterial.Material | undefined {
-  if (!supportsImmersiveLight()) {
-    return undefined;
-  }
-  const cacheKey = materialColor === undefined
-    ? `${thickness}_${isDark ? 1 : 0}_${interactive ? 1 : 0}`
-    : '';
-  if (cacheKey.length > 0) {
-    const cached = MATERIAL_CACHE.get(cacheKey);
-    if (cached !== undefined) {
-      return cached;
-    }
-  }
-  try {
-    let style = uiMaterial.ImmersiveStyle.REGULAR;
-    if (thickness === 0) {
-      style = uiMaterial.ImmersiveStyle.ULTRA_THIN;
-    } else if (thickness === 1) {
-      style = uiMaterial.ImmersiveStyle.THIN;
-    } else if (thickness === 3) {
-      style = uiMaterial.ImmersiveStyle.THICK;
-    } else if (thickness === 4) {
-      style = uiMaterial.ImmersiveStyle.ULTRA_THICK;
-    }
-    const mat = new uiMaterial.ImmersiveMaterial({
-      style: style,
-      materialColor: materialColor ?? (isDark ? '#80233432' : '#88EBF7F3'),
-      applyShadow: interactive,
-      interactive: interactive,
-      lightEffect: {
-        color: isDark ? '#42A5E4D0' : '#62FFFFFF'
-      }
-    });
-    if (cacheKey.length > 0) {
-      MATERIAL_CACHE.set(cacheKey, mat);
-    }
-    return mat;
-  } catch {
-    return undefined;
-  }
-}
+let popupMaterial: uiMaterial.Material | undefined;
 
-export class ImmersiveChrome implements AttributeModifier<CommonAttribute> {
-  private readonly enabled: boolean;
-  private readonly isDark: boolean;
-  private readonly thickness: number;
-  private readonly interactive: boolean;
-
-  constructor(enabled: boolean, isDark: boolean, thickness: number, interactive: boolean = false) {
-    this.enabled = enabled;
-    this.isDark = isDark;
-    this.thickness = thickness;
-    this.interactive = interactive;
+export function nativePopupMaterial(enabled: boolean): uiMaterial.Material | undefined {
+  if (!deviceInfo.apiAvailable('26.0.0')) return undefined;
+  if (!enabled || !supportsImmersiveLight()) return uiMaterial.Material.empty;
+  if (popupMaterial === undefined) {
+    popupMaterial = new uiMaterial.ImmersiveMaterial({ style: uiMaterial.ImmersiveStyle.THICK });
   }
-
-  applyNormalAttribute(instance: CommonAttribute): void {
-    const theme = getTheme(this.isDark);
-    const material = this.enabled ? createImmersiveMaterial(this.thickness, this.isDark, this.interactive) : undefined;
-    if (material === undefined && deviceInfo.apiAvailable('26.0.0')) {
-      instance.systemMaterial(uiMaterial.Material.empty);
-    }
-
-    // Custom bars also need a visible treatment on surfaces where ArkUI cannot render a system material.
-    instance.backgroundColor(this.enabled ? theme.chromeTint : theme.surfaceSolid);
-    instance.borderColor(this.enabled ? theme.specularBorder : theme.borderSubtle);
-    instance.backgroundEffect({ radius: this.enabled ? 12 : 0, color: Color.Transparent });
-    instance.linearGradient({
-      direction: GradientDirection.Bottom,
-      colors: [[this.enabled ? theme.chromeHighlight : Color.Transparent, 0],
-        [Color.Transparent, 0.56], [Color.Transparent, 1]]
-    });
-    if (material !== undefined) {
-      instance.systemMaterial(material);
-    }
-  }
+  return popupMaterial;
 }
 
 export class AppSpacing {

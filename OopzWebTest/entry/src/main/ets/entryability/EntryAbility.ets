@@ -31,14 +31,16 @@ export default class EntryAbility extends UIAbility {
     if (mainWindow === undefined) return;
 
     try {
-      // The window background fills both system areas while controls keep their normal safe-area layout.
-      mainWindow.setWindowBackgroundColor(getTheme(isDark).bg);
-      if (deviceInfo.deviceType === '2in1') return;
+      if (deviceInfo.deviceType === '2in1') {
+        mainWindow.setWindowBackgroundColor(getTheme(isDark).bg);
+        return;
+      }
+      const background = getTheme(isDark).bg;
       const foreground = isDark ? '#FFF2F4F2' : '#FF202628';
       mainWindow.setWindowSystemBarProperties({
-        statusBarColor: '#00000000',
+        statusBarColor: background,
         statusBarContentColor: foreground,
-        navigationBarColor: '#00000000',
+        navigationBarColor: background,
         navigationBarContentColor: foreground
       }).catch((error: BusinessError) => {
         hilog.warn(0x0, LOG_TAG, 'Unable to update system bars, code=%{public}d', error.code);

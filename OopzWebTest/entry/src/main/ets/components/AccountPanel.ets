@@ -199,15 +199,15 @@ export struct AccountPanel {
       Row({ space: 12 }) {
         Column({ space: 2 }) {
           Text('沉浸光感').fontSize(14).fontColor(getTheme(this.isDark).text)
-          Text(!this.immersiveLight ? '标题栏、通话条与底部导航使用实底' :
-            (supportsImmersiveLight() ? '标题栏、通话条与底部导航使用轻薄材质' : '使用轻薄高光'))
+          Text(supportsImmersiveLight() ? '在支持的弹层使用鸿蒙系统材质' : '当前设备使用普通样式')
             .fontSize(11)
             .fontColor(getTheme(this.isDark).textMuted)
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.immersiveLight })
+        Toggle({ type: ToggleType.Switch, isOn: this.immersiveLight && supportsImmersiveLight() })
           .accessibilityText('沉浸光感')
+          .enabled(supportsImmersiveLight())
           .selectedColor(getTheme(this.isDark).accent)
           .onChange((isOn: boolean) => {
             this.store.setImmersiveLight(this.context(), isOn);

@@ -14,7 +14,6 @@ struct Account {
         .height('100%')
         .backgroundColor(getTheme(this.isDark).bg)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-        .systemBarEffect()
         .hitTestBehavior(HitTestMode.None)
       AccountPanel()
       BottomBar({ active: 'account', showMiniBar: true })

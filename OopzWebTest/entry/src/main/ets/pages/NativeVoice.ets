@@ -20,8 +20,8 @@ import { AccountPanel } from '../components/AccountPanel';
 import { BottomBar } from '../components/BottomBar';
 import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
-import { VoiceMicStatus, VoiceOutputPicker } from '../components/VoiceDevices';
-import { AppSpacing, getTheme, ImmersiveChrome } from '../common/Theme';
+import { VoiceOutputPicker } from '../components/VoiceDevices';
+import { AppSpacing, getTheme, nativePopupMaterial } from '../common/Theme';
 import { PcTrayManager, TrayCallAction } from '../desktop/PcTrayManager';
 import { VoiceBackgroundTest, VoiceTaskState } from '../voice/VoiceBackgroundTest';
 import { VoiceAudioRoute, voiceDeviceName, VoiceRouteStatus, volumeLabel } from '../voice/VoiceAudioRoute';
@@ -42,7 +42,7 @@ const REMOTE_SPEECH_MIN_VOLUME = 24;
 const REMOTE_SPEECH_SAMPLE_WINDOW_MS = 360;
 const INITIAL_PEER_SYNC_MS = 1600;
 
-type MobilePane = 'channels' | 'home' | 'room' | 'account';
+type MobilePane = 'channels' | 'room' | 'account';
 
 interface ChannelMemberPreview {
   uid: string;
@@ -77,6 +77,10 @@ interface ChannelListItem {
   key: string;
   label: string;
   channel?: ChannelCard;
+}
+
+function isDomainHome(channel: ChannelCard): boolean {
+  return channel.isText && channel.name === '主页' && channel.group.length === 0;
 }
 
 interface ChatMessageItem {
@@ -415,6 +419,7 @@ struct NativeVoice {
   @State private chatMessages: ChatMessageItem[] = [];
   @State private chatInput: string = '';
   @State private oopzEmojiFontReady: boolean = false;
+  @State private oopzEmojiFontLoading: boolean = false;
   @State private loadingChat: boolean = false;
   @State private sendingChat: boolean = false;
   @State private readingRooms: boolean = false;
@@ -441,7 +446,6 @@ struct NativeVoice {
   @StorageProp('oopzSelfName') private selfName: string = '';
   @StorageProp('oopzSelfAvatar') private selfAvatar: string = '';
   @StorageProp('oopzCallChannelName') private activeCallName: string = '';
-  @StorageProp('oopzTaskStatus') private taskStatus: string = '';
   @StorageProp('oopzMicCue') private micCue: boolean = false;
 
   private readonly store: AppStore = AppStore.get();
@@ -721,7 +725,12 @@ struct NativeVoice {
 
   private desktopChannelItems(): ChannelListItem[] {
     const groups: Map<string, ChannelCard[]> = new Map<string, ChannelCard[]>();
+    const items: ChannelListItem[] = [];
     for (const channel of this.channelCards) {
+      if (isDomainHome(channel)) {
+        items.push(this.channelListItem(channel));
+        continue;
+      }
       const group = channel.group || '未分类';
       const existing = groups.get(group);
       if (existing !== undefined) {
@@ -730,18 +739,22 @@ struct NativeVoice {
         groups.set(group, [channel]);
       }
     }
-    const items: ChannelListItem[] = [];
     groups.forEach((channels: ChannelCard[], title: string) => {
       items.push({ key: `group-${title}`, label: title });
       for (const channel of channels) {
-        items.push({
-          key: `channel-${channel.channelId}-${channel.name}-${channel.onlineCount}-${channel.isSelected}-${channel.inCall}-${this.isDark}-${channel.members.map((member: ChannelMemberPreview) => member.uid + member.name + member.avatar).join('|')}`,
-          label: channel.name,
-          channel: channel
-        });
+        items.push(this.channelListItem(channel));
       }
     });
     return items;
+  }
+
+  private channelListItem(channel: ChannelCard): ChannelListItem {
+    const members = channel.members.map((member: ChannelMemberPreview) => member.uid + member.name + member.avatar);
+    return {
+      key: `channel-${channel.channelId}-${channel.name}-${channel.onlineCount}-${channel.isSelected}-${channel.inCall}-${this.isDark}-${members.join('|')}`,
+      label: channel.name,
+      channel: channel
+    };
   }
 
   private isInCall(): boolean {
@@ -1054,13 +1067,7 @@ struct NativeVoice {
       });
     }
     this.chatMessages = items;
-    const context = this.getAbilityContext();
-    if (!this.oopzEmojiFontReady && context !== undefined &&
-      items.some((item: ChatMessageItem) => item.textRuns.length > 0)) {
-      ensureOopzEmojiFont(context).then((ready: boolean) => {
-        if (this.activePage && ready) this.oopzEmojiFontReady = true;
-      }).catch(() => {});
-    }
+    if (items.some((item: ChatMessageItem) => item.textRuns.length > 0)) this.loadOopzEmojiFont();
     if (scrollToBottom && items.length > 0) {
       setTimeout(() => {
         try {
@@ -1069,6 +1076,18 @@ struct NativeVoice {
           // ignore if not attached yet
         }
       }, 60);
+    }
+  }
+
+  private async loadOopzEmojiFont(): Promise<void> {
+    const context = this.getAbilityContext();
+    if (context === undefined || this.oopzEmojiFontReady || this.oopzEmojiFontLoading) return;
+    this.oopzEmojiFontLoading = true;
+    try {
+      const ready = await ensureOopzEmojiFont(context).catch(() => false);
+      if (this.activePage) this.oopzEmojiFontReady = ready;
+    } finally {
+      this.oopzEmojiFontLoading = false;
     }
   }
 
@@ -1739,12 +1758,6 @@ struct NativeVoice {
   @Builder
   private desktopMoreMenu() {
     Menu() {
-      MenuItem({ content: '刷新域与频道' })
-        .enabled(!this.readingRooms)
-        .onClick(() => { this.loadAreas(); })
-      MenuItem({ content: '打开 Oopz 网页' })
-        .enabled(!this.isInCall())
-        .onClick(() => { this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' }).catch(() => {}); })
       MenuItem({ content: '最小化到托盘' })
         .onClick(() => { PcTrayManager.get().minimizeToTray(); })
     }
@@ -1789,7 +1802,6 @@ struct NativeVoice {
     .width('100%')
     .backgroundColor(getTheme(this.isDark).surfaceSolid)
     .border({ width: { bottom: 1 }, color: getTheme(this.isDark).borderSubtle })
-    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 0))
   }
 
   @Builder
@@ -2133,8 +2145,9 @@ struct NativeVoice {
     .padding({ left: 8, right: 8, top: 2, bottom: 6 })
     .margin({ top: 4, bottom: 4 })
     .borderRadius(AppSpacing.radius)
+    .backgroundColor(getTheme(this.isDark).surfaceSolid)
+    .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .clip(true)
-    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 1, true))
   }
 
   @Builder
@@ -2204,6 +2217,7 @@ struct NativeVoice {
       .accessibilityText(this.routes.mediaInput ? '选择麦克风设备' : '麦克风由系统选择')
       .onClick(() => { this.setMediaInputMenuOpen(!this.mediaInputMenuOpen); })
       .bindMenu(this.mediaInputMenuOpen, this.mediaInputMenu, {
+        systemMaterial: nativePopupMaterial(this.immersiveLight),
         onDisappear: () => { this.setMediaInputMenuOpen(false); }
       })
     }
@@ -2259,7 +2273,6 @@ struct NativeVoice {
       .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
       .borderRadius(AppSpacing.radius)
       .clip(true)
-      .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 1, true))
     }
     .width('100%')
     .padding({ left: 10, right: 10, top: 5, bottom: 10 })
@@ -2268,7 +2281,7 @@ struct NativeVoice {
   @Builder
   private headerBar() {
     Row({ space: 9 }) {
-      if (this.mobilePane === 'room' || this.mobilePane === 'home') {
+      if (this.mobilePane === 'room') {
         Button({ type: ButtonType.Normal }) {
           SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(17).fontColor([getTheme(this.isDark).text])
         }
@@ -2288,33 +2301,11 @@ struct NativeVoice {
         .fontColor(getTheme(this.isDark).text)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-      if (this.mobilePane === 'channels') {
-        Button({ type: ButtonType.Normal }) {
-          SymbolGlyph($r('sys.symbol.ellipsis_circle')).fontSize(22).fontColor([getTheme(this.isDark).text])
-        }
-        .width(40)
-        .height(40)
-        .borderRadius(AppSpacing.radiusSm)
-        .backgroundColor(Color.Transparent)
-        .accessibilityText('频道操作')
-        .bindMenu(this.mobileChannelMenu())
-      }
     }
     .width('100%')
+    .height(50)
     .padding({ left: 12, right: 10, top: 6, bottom: 6 })
-    .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 0))
-  }
-
-  @Builder
-  private mobileChannelMenu() {
-    Menu() {
-      MenuItem({ content: '刷新域与频道' })
-        .enabled(!this.readingRooms)
-        .onClick(() => { this.loadAreas(); })
-      MenuItem({ content: '打开 Oopz 网页' })
-        .enabled(!this.isInCall())
-        .onClick(() => { this.getUIContext().getRouter().pushUrl({ url: 'pages/Index' }).catch(() => {}); })
-    }
+    .backgroundColor(getTheme(this.isDark).bg)
   }
 
   @Builder
@@ -2324,7 +2315,8 @@ struct NativeVoice {
         ForEach(this.areas, (area: OopzArea) => {
           Button({ type: ButtonType.Normal }) {
             if (area.avatar.length > 0) {
-              Image(area.avatar).width(34).height(34).borderRadius(AppSpacing.radiusSm).objectFit(ImageFit.Cover)
+              Image(area.avatar).width(34).height(34).borderRadius(AppSpacing.radiusSm)
+                .clip(true).objectFit(ImageFit.Cover)
             } else {
               Text(area.name.slice(0, 1)).fontSize(17).fontColor(getTheme(this.isDark).text)
             }
@@ -2332,11 +2324,10 @@ struct NativeVoice {
           .width(44)
           .height(44)
           .padding(0)
-          .borderRadius(AppSpacing.radius)
           .backgroundColor(area.areaId === this.selectedAreaId ? getTheme(this.isDark).accentSoft :
             getTheme(this.isDark).surfaceAlt)
           .border({ width: 1, color: area.areaId === this.selectedAreaId ? getTheme(this.isDark).accent :
-            Color.Transparent })
+            Color.Transparent, radius: AppSpacing.radius })
           .accessibilityText(area.name)
           .onClick(() => { this.selectArea(area.areaId); })
         }, (area: OopzArea) => area.areaId)
@@ -2385,7 +2376,8 @@ struct NativeVoice {
     Row({ space: 4 }) {
       Button({ type: ButtonType.Normal }) {
         Row({ space: 8 }) {
-          SymbolGlyph(channel.isText ? $r('sys.symbol.message') : $r('sys.symbol.mic'))
+          SymbolGlyph(isDomainHome(channel) ? $r('sys.symbol.house') :
+            (channel.isText ? $r('sys.symbol.message') : $r('sys.symbol.mic')))
             .fontSize(17)
             .fontColor([channel.inCall ? getTheme(this.isDark).accent : getTheme(this.isDark).textSecondary])
           Text(channel.name)
@@ -2428,7 +2420,7 @@ struct NativeVoice {
     .width('100%')
     .borderRadius(AppSpacing.radiusSm)
     .backgroundColor(channel.inCall || (this.mobilePane === 'room' && channel.isSelected)
-      ? getTheme(this.isDark).accentSoft : Color.Transparent)
+      ? getTheme(this.isDark).accentSoft : (isDomainHome(channel) ? getTheme(this.isDark).surfaceAlt : Color.Transparent))
 
     if (this.expandedChannels.includes(channel.channelId) && channel.members.length > 0) {
       Column({ space: 4 }) {
@@ -2456,21 +2448,16 @@ struct NativeVoice {
   private mobileChannelBrowser() {
     Scroll(this.channelScroller) {
       Column({ space: 3 }) {
-        if (this.selectedAreaObj !== undefined) {
-          Button({ type: ButtonType.Normal }) {
-            Row({ space: 8 }) {
-              SymbolGlyph($r('sys.symbol.house')).fontSize(17).fontColor([getTheme(this.isDark).textSecondary])
-              Text('主页').fontSize(14).fontColor(getTheme(this.isDark).text)
-            }
+        if ((this.selectedAreaObj?.banner ?? '').length > 0) {
+          Image(this.selectedAreaObj?.banner ?? '')
             .width('100%')
-          }
-          .width('100%')
-          .height(40)
-          .padding({ left: 8, right: 8 })
-          .borderRadius(AppSpacing.radiusSm)
-          .backgroundColor(getTheme(this.isDark).surfaceAlt)
-          .accessibilityText('域主页')
-          .onClick(() => { this.mobilePane = 'home'; })
+            .aspectRatio(1.78)
+            .constraintSize({ maxHeight: 188 })
+            .objectFit(ImageFit.Cover)
+            .borderRadius(AppSpacing.radius)
+            .clip(true)
+            .margin({ bottom: 5 })
+            .accessibilityText('域封面')
         }
         ForEach(this.desktopChannelItems(), (item: ChannelListItem) => {
           if (item.channel === undefined) {
@@ -2601,6 +2588,8 @@ struct NativeVoice {
           .height(42)
           .borderRadius(14)
           .fontColor(getTheme(this.isDark).text)
+          .fontFamily(this.oopzEmojiFontReady && /[\u{103200}-\u{10320f}]/u.test(this.chatInput)
+            ? OOPZ_EMOJI_FONT_FAMILY + ',sans-serif' : undefined)
           .placeholderColor(getTheme(this.isDark).textMuted)
           .backgroundColor(getTheme(this.isDark).surfaceAlt)
           .enterKeyType(EnterKeyType.Send)
@@ -2610,8 +2599,13 @@ struct NativeVoice {
         ChatEmojiPicker({
           isDark: this.isDark,
           isOpen: $emojiPickerOpen,
+          fontReady: this.oopzEmojiFontReady,
+          fontLoading: this.oopzEmojiFontLoading,
           onPick: (emoji: string) => { this.chatInput += emoji; },
-          onOpenChange: (open: boolean) => { this.store.setGripInteractionActive('voice-emoji', open); }
+          onOpenChange: (open: boolean) => {
+            this.store.setGripInteractionActive('voice-emoji', open);
+            if (open) this.loadOopzEmojiFont();
+          }
         })
 
         Button(this.sendingChat ? '发送中' : '发送')
@@ -2788,17 +2782,14 @@ struct NativeVoice {
         }
 
         if (this.isViewingActiveRoom()) {
-          VoiceMicStatus({
-            muted: this.muted,
-            capturing: this.capturing,
-            input: this.routes.input,
-            output: this.routes.output,
-            playbackMuted: this.speakerMuted,
-            volumeType: volumeLabel(this.routes.usage),
-            rates: this.rates,
-            task: this.taskStatus,
-            isDark: this.isDark
-          })
+          Text(this.rates || '发送 0 kbps · 接收 0 kbps')
+            .width('100%')
+            .fontSize(12)
+            .fontColor(getTheme(this.isDark).textSecondary)
+            .padding({ left: 14, right: 14, top: 9, bottom: 9 })
+            .borderRadius(AppSpacing.radiusSm)
+            .backgroundColor(getTheme(this.isDark).surface)
+            .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
         }
 
         // Action Controls
@@ -2961,22 +2952,12 @@ struct NativeVoice {
   @Builder
   private mobileShell() {
     Stack() {
-      if (deviceInfo.apiAvailable('26.0.0')) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor(getTheme(this.isDark).bg)
-          .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-          .systemBarEffect()
-          .hitTestBehavior(HitTestMode.None)
-      } else {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor(getTheme(this.isDark).bg)
-          .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
-          .hitTestBehavior(HitTestMode.None)
-      }
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(getTheme(this.isDark).bg)
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
+        .hitTestBehavior(HitTestMode.None)
 
       Column() {
         if (this.mobilePane !== 'account') {
@@ -3017,8 +2998,6 @@ struct NativeVoice {
             }
             .width('100%')
             .height('100%')
-          } else if (this.mobilePane === 'home') {
-            this.domainHome()
           } else {
             this.roomDetailPane()
           }
@@ -3041,6 +3020,7 @@ struct NativeVoice {
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(getTheme(this.isDark).bg)
   }
 
   build() {

@@ -1,4 +1,4 @@
-import { AppSpacing, getTheme, ImmersiveChrome } from '../common/Theme';
+import { AppSpacing, getTheme } from '../common/Theme';
 import { AppStore } from '../store/AppStore';
 
 // Floating spatial-glass bottom navigation dock + optional global mini call capsule.
@@ -10,7 +10,6 @@ export struct BottomBar {
   onReturnRoom?: () => void;
 
   @StorageProp('oopzIsDark') private isDark: boolean = true;
-  @StorageProp('oopzImmersiveLight') private immersiveLight: boolean = true;
   @StorageProp('oopzInCall') private inCall: boolean = false;
   @StorageProp('oopzCallChannelName') private callChannelName: string = '';
   @StorageProp('oopzCallMuted') private callMuted: boolean = false;
@@ -132,7 +131,7 @@ export struct BottomBar {
         .borderRadius(AppSpacing.radiusLg)
         .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
         .shadow({ radius: 18, color: getTheme(this.isDark).shadowColor, offsetY: 6 })
-        .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 1, true))
+        .backgroundColor(getTheme(this.isDark).surfaceSolid)
         .onTouch((event: TouchEvent) => { this.handleDockTouch(event); })
         .onClick(() => { this.openActiveRoom(); })
       }
@@ -145,7 +144,7 @@ export struct BottomBar {
       .borderRadius(AppSpacing.radiusLg)
       .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
       .shadow({ radius: 22, color: getTheme(this.isDark).shadowColor, offsetY: 8 })
-      .attributeModifier(new ImmersiveChrome(this.immersiveLight, this.isDark, 1, true))
+      .backgroundColor(getTheme(this.isDark).surfaceSolid)
       .onTouch((event: TouchEvent) => { this.handleDockTouch(event); })
     }
     .width('100%')
