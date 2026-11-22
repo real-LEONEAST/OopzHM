@@ -1,11 +1,12 @@
 import { AccountPanel } from '../components/AccountPanel';
-import { BottomBar } from '../components/BottomBar';
+import { BottomBar, BOTTOM_BAR_INSET, BOTTOM_BAR_INSET_WITH_CALL } from '../components/BottomBar';
 import { getTheme } from '../common/Theme';
 
 @Entry
 @Component
 struct Account {
   @StorageProp('oopzIsDark') private isDark: boolean = true;
+  @StorageProp('oopzInCall') private inCall: boolean = false;
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
@@ -15,7 +16,7 @@ struct Account {
         .backgroundColor(getTheme(this.isDark).bg)
         .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
         .hitTestBehavior(HitTestMode.None)
-      AccountPanel()
+      AccountPanel({ bottomInset: this.inCall ? BOTTOM_BAR_INSET_WITH_CALL : BOTTOM_BAR_INSET })
       BottomBar({ active: 'account', showMiniBar: true })
     }
     .width('100%')

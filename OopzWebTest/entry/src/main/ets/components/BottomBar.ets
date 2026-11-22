@@ -1,6 +1,15 @@
 import { AppSpacing, getTheme } from '../common/Theme';
 import { AppStore } from '../store/AppStore';
 
+const TAB_HEIGHT = 42;
+const TAB_PADDING = 4;
+const DOCK_BOTTOM_MARGIN = 12;
+const MINI_CALL_HEIGHT = 40;
+const MINI_CALL_GAP = 8;
+
+export const BOTTOM_BAR_INSET = TAB_HEIGHT + TAB_PADDING * 2 + DOCK_BOTTOM_MARGIN;
+export const BOTTOM_BAR_INSET_WITH_CALL = BOTTOM_BAR_INSET + MINI_CALL_HEIGHT + MINI_CALL_GAP;
+
 // Floating spatial-glass bottom navigation dock + optional global mini call capsule.
 @Component
 export struct BottomBar {
@@ -95,7 +104,7 @@ export struct BottomBar {
         .fontWeight(this.active === key ? FontWeight.Medium : FontWeight.Normal)
     }
     .width(76)
-    .height(42)
+    .height(TAB_HEIGHT)
     .borderRadius(AppSpacing.radiusLg)
     .backgroundColor(this.active === key ? getTheme(this.isDark).accentSoft : Color.Transparent)
     .justifyContent(FlexAlign.Center)
@@ -104,7 +113,7 @@ export struct BottomBar {
   }
 
   build() {
-    Column({ space: 8 }) {
+    Column({ space: MINI_CALL_GAP }) {
       if (this.inCall && this.showMiniBar) {
         Row({ space: 8 }) {
           Row()
@@ -126,7 +135,7 @@ export struct BottomBar {
             .borderRadius(AppSpacing.radiusSm)
             .backgroundColor(this.callMuted ? getTheme(this.isDark).warnSoft : getTheme(this.isDark).speakingSoft)
         }
-        .height(40)
+        .height(MINI_CALL_HEIGHT)
         .padding({ left: 14, right: 10 })
         .borderRadius(AppSpacing.radiusLg)
         .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
@@ -140,7 +149,7 @@ export struct BottomBar {
         this.tabItem('频道', 'voice')
         this.tabItem('我的', 'account')
       }
-      .padding(4)
+      .padding(TAB_PADDING)
       .borderRadius(AppSpacing.radiusLg)
       .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
       .shadow({ radius: 22, color: getTheme(this.isDark).shadowColor, offsetY: 8 })
@@ -148,8 +157,8 @@ export struct BottomBar {
       .onTouch((event: TouchEvent) => { this.handleDockTouch(event); })
     }
     .width('100%')
-    .padding({ left: 16, right: 16, bottom: 12 })
+    .padding({ left: 16, right: 16, bottom: DOCK_BOTTOM_MARGIN })
     .alignItems(this.alignOfGrip())
-    .hitTestBehavior(HitTestMode.Transparent)
+    .hitTestBehavior(HitTestMode.None)
   }
 }

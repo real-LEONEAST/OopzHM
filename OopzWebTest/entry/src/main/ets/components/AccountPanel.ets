@@ -1,7 +1,7 @@
 import { bundleManager, common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { AppStore, DEFAULT_MIC_GAIN, MAX_MIC_GAIN } from '../store/AppStore';
-import { AppSpacing, getTheme, supportsImmersiveLight } from '../common/Theme';
+import { AppSpacing, getTheme } from '../common/Theme';
 import { PcTrayManager } from '../desktop/PcTrayManager';
 import { VoiceGainSlider } from './VoiceGainSlider';
 
@@ -11,9 +11,9 @@ const TAG = 'OopzAccount';
 export struct AccountPanel {
   @Prop embedded: boolean = false;
   @Prop settingsFirst: boolean = false;
+  @Prop bottomInset: number = 0;
   onClose: () => void = () => {};
   @StorageProp('oopzIsDark') private isDark: boolean = true;
-  @StorageProp('oopzImmersiveLight') private immersiveLight: boolean = true;
   @StorageProp('oopzThemeMode') private themeMode: string = 'system';
   @StorageProp('oopzIsPc') private isPc: boolean = false;
   @StorageProp('oopzTrayOnClose') private trayOnClose: boolean = true;
@@ -196,25 +196,6 @@ export struct AccountPanel {
       .width('100%')
       .alignItems(HorizontalAlign.Start)
 
-      Row({ space: 12 }) {
-        Column({ space: 2 }) {
-          Text('沉浸光感').fontSize(14).fontColor(getTheme(this.isDark).text)
-          Text(supportsImmersiveLight() ? '在支持的弹层使用鸿蒙系统材质' : '当前设备使用普通样式')
-            .fontSize(11)
-            .fontColor(getTheme(this.isDark).textMuted)
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.immersiveLight && supportsImmersiveLight() })
-          .accessibilityText('沉浸光感')
-          .enabled(supportsImmersiveLight())
-          .selectedColor(getTheme(this.isDark).accent)
-          .onChange((isOn: boolean) => {
-            this.store.setImmersiveLight(this.context(), isOn);
-          })
-      }
-      .width('100%')
-
       VoiceGainSlider({
         label: '麦克风发送音量',
         value: this.micGain,
@@ -377,7 +358,7 @@ export struct AccountPanel {
       }
       .width('100%')
       .constraintSize({ maxWidth: 620 })
-      .padding({ top: 20, bottom: this.embedded && this.isPc ? 20 : 120,
+      .padding({ top: 20, bottom: 20 + this.bottomInset,
         left: AppSpacing.page, right: AppSpacing.page })
       .alignItems(HorizontalAlign.Start)
     }

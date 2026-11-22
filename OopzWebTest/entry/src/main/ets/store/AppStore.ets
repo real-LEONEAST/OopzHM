@@ -230,13 +230,6 @@ export class AppStore {
     }
   }
 
-  setImmersiveLight(context: common.UIAbilityContext | undefined, enabled: boolean): void {
-    AppStorage.setOrCreate<boolean>('oopzImmersiveLight', enabled);
-    if (context !== undefined) {
-      this.saveUiPrefValue(context, 'immersiveLight', enabled);
-    }
-  }
-
   setGripEnabled(context: common.UIAbilityContext | undefined, enabled: boolean): void {
     AppStorage.setOrCreate<boolean>('oopzGripEnabled', enabled);
     this.updateGripObserver();

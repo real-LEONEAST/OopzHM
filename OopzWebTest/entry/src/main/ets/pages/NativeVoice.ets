@@ -17,7 +17,7 @@ import { extractAppId } from '../oopz/OopzToken';
 import { OOPZ_TEST_TOKEN, OOPZ_TEST_APPID } from '../oopz/OopzKeyMaterial';
 import { AppStore, DEFAULT_MIC_GAIN, MAX_MEMBER_GAIN, MAX_MIC_GAIN } from '../store/AppStore';
 import { AccountPanel } from '../components/AccountPanel';
-import { BottomBar } from '../components/BottomBar';
+import { BottomBar, BOTTOM_BAR_INSET } from '../components/BottomBar';
 import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
 import { VoiceOutputPicker } from '../components/VoiceDevices';
@@ -2323,7 +2323,7 @@ struct NativeVoice {
         }, (area: OopzArea) => area.areaId)
       }
       .width('100%')
-      .padding({ top: 8, bottom: 10 })
+      .padding({ top: 8, bottom: 10 + BOTTOM_BAR_INSET })
     }
     .scrollBar(BarState.Off)
     .width(MOBILE_DOMAIN_RAIL_WIDTH)
@@ -2467,7 +2467,9 @@ struct NativeVoice {
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
-      .padding({ left: MOBILE_CHANNEL_PADDING, right: MOBILE_CHANNEL_PADDING, top: 8, bottom: 12 })
+      .padding({
+        left: MOBILE_CHANNEL_PADDING, right: MOBILE_CHANNEL_PADDING, top: 8, bottom: 12 + BOTTOM_BAR_INSET
+      })
     }
     .scrollBar(BarState.Off)
     .width('100%')
@@ -2617,7 +2619,7 @@ struct NativeVoice {
       left: 16,
       right: 16,
       top: 14,
-      bottom: 8
+      bottom: 8 + (this.isPc ? 0 : BOTTOM_BAR_INSET)
     })
   }
 
@@ -2873,7 +2875,9 @@ struct NativeVoice {
         }
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: this.isPc ? 0 : 16, bottom: 12 })
+      .padding({
+        left: 16, right: 16, top: this.isPc ? 0 : 16, bottom: 12 + (this.isPc ? 0 : BOTTOM_BAR_INSET)
+      })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
@@ -2949,7 +2953,7 @@ struct NativeVoice {
 
   @Builder
   private mobileShell() {
-    Stack() {
+    Stack({ alignContent: Alignment.Bottom }) {
       Column()
         .width('100%')
         .height('100%')
@@ -2964,7 +2968,11 @@ struct NativeVoice {
 
         Column() {
           if (this.mobilePane === 'account') {
-            AccountPanel({ embedded: true, onClose: () => { this.backToParent(); } })
+            AccountPanel({
+              embedded: true,
+              bottomInset: BOTTOM_BAR_INSET,
+              onClose: () => { this.backToParent(); }
+            })
           } else if (this.isWide()) {
             Row() {
               this.mobileDomainRail()
@@ -3002,16 +3010,16 @@ struct NativeVoice {
         }
         .width('100%')
         .layoutWeight(1)
-
-        BottomBar({
-          active: this.mobilePane === 'account' ? 'account' : 'voice',
-          showMiniBar: false,
-          onNavigate: (tab: string) => { this.switchMobileTab(tab); },
-          onReturnRoom: () => { this.jumpToActiveRoom(); }
-        })
       }
       .width('100%')
       .height('100%')
+
+      BottomBar({
+        active: this.mobilePane === 'account' ? 'account' : 'voice',
+        showMiniBar: false,
+        onNavigate: (tab: string) => { this.switchMobileTab(tab); },
+        onReturnRoom: () => { this.jumpToActiveRoom(); }
+      })
     }
     .width('100%')
     .height('100%')
