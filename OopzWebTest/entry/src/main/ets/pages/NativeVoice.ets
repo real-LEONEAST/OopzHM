@@ -37,6 +37,9 @@ const PC_DOMAIN_RAIL_WIDTH = 64;
 const PC_CHANNEL_PANE_WIDTH = 224;
 const PC_CALL_BAR_COMPACT_VP = 506;
 const PC_CAPTION_HEIGHT = 40;
+const MOBILE_DOMAIN_RAIL_WIDTH = 56;
+const MOBILE_CHANNEL_PADDING = 8;
+const MOBILE_DOMAIN_TITLE_INDENT = 10;
 const SPEAK_HOLD_MS = 440;
 const REMOTE_SPEECH_MIN_VOLUME = 24;
 const REMOTE_SPEECH_SAMPLE_WINDOW_MS = 360;
@@ -80,7 +83,11 @@ interface ChannelListItem {
 }
 
 function isDomainHome(channel: ChannelCard): boolean {
-  return channel.isText && channel.name === '主页' && channel.group.length === 0;
+  if (!channel.isText || channel.name !== '主页') {
+    return false;
+  }
+  const group = channel.group.trim();
+  return group === '' || group === '无分类' || group === '未分类';
 }
 
 interface ChatMessageItem {
@@ -592,7 +599,7 @@ struct NativeVoice {
       this.setMediaInputMenuOpen(false);
       return true;
     }
-    if (this.showMicGain) {
+    if (this.showMicGain && (this.isPc || this.isViewingActiveRoom())) {
       this.showMicGain = false;
       return true;
     }
@@ -727,7 +734,7 @@ struct NativeVoice {
     const groups: Map<string, ChannelCard[]> = new Map<string, ChannelCard[]>();
     const items: ChannelListItem[] = [];
     for (const channel of this.channelCards) {
-      if (isDomainHome(channel)) {
+      if (isDomainHome(channel) && (!this.isPc || channel.group.length === 0)) {
         items.push(this.channelListItem(channel));
         continue;
       }
@@ -1756,14 +1763,6 @@ struct NativeVoice {
   }
 
   @Builder
-  private desktopMoreMenu() {
-    Menu() {
-      MenuItem({ content: '最小化到托盘' })
-        .onClick(() => { PcTrayManager.get().minimizeToTray(); })
-    }
-  }
-
-  @Builder
   private desktopHeader() {
     Column() {
       Row({ space: 10 }) {
@@ -1786,15 +1785,16 @@ struct NativeVoice {
         }
         Blank()
         Button({ type: ButtonType.Normal }) {
-          SymbolGlyph($r('sys.symbol.ellipsis_circle')).fontSize(19).fontColor([getTheme(this.isDark).textSecondary])
+          SymbolGlyph($r('sys.symbol.square_and_arrow_down'))
+            .fontSize(19).fontColor([getTheme(this.isDark).textSecondary])
         }
         .width(36)
         .height(34)
         .borderRadius(8)
         .backgroundColor(Color.Transparent)
-        .accessibilityText('更多操作')
+        .accessibilityText('最小化到托盘')
         .hoverEffect(HoverEffect.Highlight)
-        .bindMenu(this.desktopMoreMenu())
+        .onClick(() => { PcTrayManager.get().minimizeToTray(); })
       }
       .width('100%')
       .padding({ left: 12, right: this.captionInset + 12, top: 3, bottom: 3 })
@@ -2130,27 +2130,6 @@ struct NativeVoice {
   }
 
   @Builder
-  private mobileCallBar() {
-    Column({ space: 4 }) {
-      if (this.showMicGain) {
-        this.microphoneGainPanel()
-      }
-      Row({ space: 5 }) {
-        this.desktopCallSummary()
-      }
-      .width('100%')
-      this.callActions(true)
-    }
-    .width('calc(100% - 20vp)')
-    .padding({ left: 8, right: 8, top: 2, bottom: 6 })
-    .margin({ top: 4, bottom: 4 })
-    .borderRadius(AppSpacing.radius)
-    .backgroundColor(getTheme(this.isDark).surfaceSolid)
-    .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
-    .clip(true)
-  }
-
-  @Builder
   private inputPickerGlyph() {
     Row() {
       SymbolGlyph($r('sys.symbol.chevron_down')).fontSize(12).fontColor([getTheme(this.isDark).textSecondary])
@@ -2304,7 +2283,13 @@ struct NativeVoice {
     }
     .width('100%')
     .height(50)
-    .padding({ left: 12, right: 10, top: 6, bottom: 6 })
+    .padding({
+      left: this.mobilePane === 'channels'
+        ? MOBILE_DOMAIN_RAIL_WIDTH + MOBILE_CHANNEL_PADDING + MOBILE_DOMAIN_TITLE_INDENT : 12,
+      right: 10,
+      top: 6,
+      bottom: 6
+    })
     .backgroundColor(getTheme(this.isDark).bg)
   }
 
@@ -2315,20 +2300,25 @@ struct NativeVoice {
         ForEach(this.areas, (area: OopzArea) => {
           Button({ type: ButtonType.Normal }) {
             if (area.avatar.length > 0) {
-              Image(area.avatar).width(34).height(34).borderRadius(AppSpacing.radiusSm)
+              Image(area.avatar).width(38).height(38).borderRadius(AppSpacing.radiusSm)
                 .clip(true).objectFit(ImageFit.Cover)
             } else {
-              Text(area.name.slice(0, 1)).fontSize(17).fontColor(getTheme(this.isDark).text)
+              Text(area.name.slice(0, 1))
+                .width(38).height(38)
+                .textAlign(TextAlign.Center)
+                .fontSize(17)
+                .fontColor(getTheme(this.isDark).text)
+                .backgroundColor(getTheme(this.isDark).surfaceAlt)
+                .borderRadius(AppSpacing.radiusSm)
             }
           }
           .width(44)
           .height(44)
           .padding(0)
-          .backgroundColor(area.areaId === this.selectedAreaId ? getTheme(this.isDark).accentSoft :
-            getTheme(this.isDark).surfaceAlt)
-          .border({ width: 1, color: area.areaId === this.selectedAreaId ? getTheme(this.isDark).accent :
-            Color.Transparent, radius: AppSpacing.radius })
-          .accessibilityText(area.name)
+          .backgroundColor(Color.Transparent)
+          .border({ width: 1.5, color: area.areaId === this.selectedAreaId ? getTheme(this.isDark).accent :
+            Color.Transparent, radius: AppSpacing.radiusSm + 3 })
+          .accessibilityText(area.areaId === this.selectedAreaId ? `${area.name}，当前域` : area.name)
           .onClick(() => { this.selectArea(area.areaId); })
         }, (area: OopzArea) => area.areaId)
       }
@@ -2336,10 +2326,8 @@ struct NativeVoice {
       .padding({ top: 8, bottom: 10 })
     }
     .scrollBar(BarState.Off)
-    .width(56)
+    .width(MOBILE_DOMAIN_RAIL_WIDTH)
     .height('100%')
-    .backgroundColor(getTheme(this.isDark).rail)
-    .borderRadius({ topRight: AppSpacing.radius, bottomRight: AppSpacing.radius })
     .align(Alignment.Top)
   }
 
@@ -2376,8 +2364,7 @@ struct NativeVoice {
     Row({ space: 4 }) {
       Button({ type: ButtonType.Normal }) {
         Row({ space: 8 }) {
-          SymbolGlyph(isDomainHome(channel) ? $r('sys.symbol.house') :
-            (channel.isText ? $r('sys.symbol.message') : $r('sys.symbol.mic')))
+          SymbolGlyph(channel.isText ? $r('sys.symbol.message') : $r('sys.symbol.mic'))
             .fontSize(17)
             .fontColor([channel.inCall ? getTheme(this.isDark).accent : getTheme(this.isDark).textSecondary])
           Text(channel.name)
@@ -2420,7 +2407,7 @@ struct NativeVoice {
     .width('100%')
     .borderRadius(AppSpacing.radiusSm)
     .backgroundColor(channel.inCall || (this.mobilePane === 'room' && channel.isSelected)
-      ? getTheme(this.isDark).accentSoft : (isDomainHome(channel) ? getTheme(this.isDark).surfaceAlt : Color.Transparent))
+      ? getTheme(this.isDark).accentSoft : Color.Transparent)
 
     if (this.expandedChannels.includes(channel.channelId) && channel.members.length > 0) {
       Column({ space: 4 }) {
@@ -2480,7 +2467,7 @@ struct NativeVoice {
       }
       .width('100%')
       .alignItems(HorizontalAlign.Start)
-      .padding({ left: 8, right: 8, top: 8, bottom: 12 })
+      .padding({ left: MOBILE_CHANNEL_PADDING, right: MOBILE_CHANNEL_PADDING, top: 8, bottom: 12 })
     }
     .scrollBar(BarState.Off)
     .width('100%')
@@ -2790,6 +2777,17 @@ struct NativeVoice {
             .borderRadius(AppSpacing.radiusSm)
             .backgroundColor(getTheme(this.isDark).surface)
             .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
+
+          if (!this.isPc) {
+            Row() {
+              this.callActions(true)
+            }
+            .width('100%')
+            .justifyContent(FlexAlign.Center)
+            if (this.showMicGain) {
+              this.microphoneGainPanel()
+            }
+          }
         }
 
         // Action Controls
@@ -3005,9 +3003,6 @@ struct NativeVoice {
         .width('100%')
         .layoutWeight(1)
 
-        if (this.isInCall()) {
-          this.mobileCallBar()
-        }
         BottomBar({
           active: this.mobilePane === 'account' ? 'account' : 'voice',
           showMiniBar: false,
