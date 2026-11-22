@@ -22,6 +22,7 @@ import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
 import { VoiceOutputPicker } from '../components/VoiceDevices';
 import { AppSpacing, getTheme, nativePopupMaterial } from '../common/Theme';
+import type { VoiceMode } from '../common/VoiceMode';
 import { PcTrayManager, TrayCallAction } from '../desktop/PcTrayManager';
 import { VoiceBackgroundTest, VoiceTaskState } from '../voice/VoiceBackgroundTest';
 import { VoiceAudioRoute, voiceDeviceName, VoiceRouteStatus, volumeLabel } from '../voice/VoiceAudioRoute';
@@ -461,6 +462,8 @@ struct NativeVoice {
   private readonly channelOffsets: Map<string, number> = new Map<string, number>();
   private paneBeforeAccount: MobilePane = 'channels';
   private rtc?: NativeRtcCall;
+  private callVoiceMode: VoiceMode = 'standard';
+  private fallbackCleanup?: Promise<void>;
   private captionWindow?: window.Window;
   private originalCaptionHeight: number = PC_CAPTION_HEIGHT;
   private captionObserverAttached: boolean = false;
@@ -1327,7 +1330,27 @@ struct NativeVoice {
       this.peers,
       this.rates
     );
+    this.syncCallAudioStatus();
     PcTrayManager.get().updateTrayState(inCall, channelLabel, this.muted);
+  }
+
+  private syncCallAudioStatus(): void {
+    const mode = this.state === CallState.CONNECTED || this.state === CallState.RECONNECTING ? this.callVoiceMode : '';
+    AppStorage.setOrCreate<VoiceMode | ''>('oopzActiveVoiceMode', mode);
+    let processing = '';
+    if (mode !== '') {
+      if (this.muted) {
+        processing = '麦克风已关闭';
+      } else if (this.capturing && this.routes.voipStreams) {
+        processing = 'VoIP 已接入 · 系统自动';
+      } else {
+        processing = mode === 'native-voip' ? '等待通话采播确认' : '普通媒体采播';
+      }
+    }
+    AppStorage.setOrCreate<string>('oopzCallProcessing', processing);
+    const supportsAec = this.routes.acousticEchoCancelerSupported;
+    AppStorage.setOrCreate<string>('oopzCallAecSupport',
+      supportsAec === undefined ? '未查询到' : (supportsAec ? '通话音源支持' : '通话音源不支持'));
   }
 
   private startSystemCallSession(): void {
@@ -1348,6 +1371,7 @@ struct NativeVoice {
     AppStorage.setOrCreate<string>('oopzCallInput', this.muted ? '已关闭' : status.input);
     AppStorage.setOrCreate<string>('oopzCallOutput', status.output);
     AppStorage.setOrCreate<string>('oopzCallVolumeType', volumeLabel(status.usage));
+    this.syncCallAudioStatus();
     this.maybeStartTask();
   }
 
@@ -1385,6 +1409,9 @@ struct NativeVoice {
     this.state = CallState.JOINING;
     this.notice = '正在申请麦克风权限';
     try {
+      await this.store.loadUiPrefs(context);
+      if (!this.activePage || generation !== this.joinGeneration) return;
+      const mode = AppStorage.get<VoiceMode>('oopzVoiceMode') ?? 'standard';
       const auth = await abilityAccessCtrl.createAtManager().requestPermissionsFromUser(context, [MIC_PERMISSION]);
       if (!this.activePage || generation !== this.joinGeneration || this.state !== CallState.JOINING) {
         return;
@@ -1425,11 +1452,21 @@ struct NativeVoice {
       this.syncCallStore();
       this.syncViewModels();
       this.notice = '正在连接语音服务';
-      this.voiceRoute.begin(context, (status: VoiceRouteStatus) => { this.updateVoiceRoute(status); });
       this.joinTimer = setTimeout(() => { this.leave('进房超时，请检查网络连接'); }, 20000);
-      await this.voiceRoute.activateMixing();
+      const started = await this.startCallAudio(context, rtc, room, mode, generation);
+      if (started || mode !== 'native-voip' || !this.activePage || generation !== this.joinGeneration) return;
+
+      const cleanup = rtc.close().finally(() => this.voiceRoute.close());
+      this.fallbackCleanup = cleanup;
+      try {
+        await cleanup;
+      } finally {
+        this.fallbackCleanup = undefined;
+      }
       if (!this.activePage || generation !== this.joinGeneration) return;
-      rtc.start(context, room, this.callEvents(), true, this.micGain);
+      this.updateVoiceRoute(new VoiceRouteStatus());
+      this.getUIContext().getPromptAction().showToast({ message: '原生 VoIP 初始化失败，本次使用标准语音' });
+      await this.startCallAudio(context, rtc, room, 'standard', generation);
     } catch (error) {
       if (generation !== this.joinGeneration) {
         return;
@@ -1438,6 +1475,15 @@ struct NativeVoice {
       const known = /^(启用原生音频失败|原生 SDK 拒绝进房)（-?\d+）$/.test(message);
       await this.leave(known ? message : '无法加入语音频道');
     }
+  }
+
+  private async startCallAudio(context: common.UIAbilityContext, rtc: NativeRtcCall, room: RtcRoom,
+    mode: VoiceMode, generation: number): Promise<boolean> {
+    this.callVoiceMode = mode;
+    this.voiceRoute.begin(context, (status: VoiceRouteStatus) => { this.updateVoiceRoute(status); }, mode);
+    await this.voiceRoute.activateMixing();
+    if (!this.activePage || generation !== this.joinGeneration) return false;
+    return rtc.start(context, room, this.callEvents(), true, this.micGain, mode);
   }
 
   private startKeepAlive(): void {
@@ -1539,7 +1585,11 @@ struct NativeVoice {
         hilog.info(0x0, TAG, 'Native mic active=%{public}d reason=%{public}d', capturing ? 1 : 0, reason);
         if (capturing && !this.muted) this.applyMicGain();
         this.voiceRoute.refresh();
+        this.syncCallAudioStatus();
         this.maybeStartTask();
+      },
+      systemStreams: (captureId: number, playbackId: number) => {
+        this.voiceRoute.identifySystemStreams(captureId, playbackId);
       },
       peerCountChanged: (count: number) => {
         this.peers = count;
@@ -1702,6 +1752,7 @@ struct NativeVoice {
     const context = this.getAbilityContext();
 
     try {
+      await this.fallbackCleanup;
       await this.rtc?.close();
     } catch {
       hilog.warn(0x0, TAG, 'Native RTC cleanup failed');

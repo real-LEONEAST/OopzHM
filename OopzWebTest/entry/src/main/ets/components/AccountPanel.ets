@@ -2,6 +2,7 @@ import { bundleManager, common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { AppStore, DEFAULT_MIC_GAIN, MAX_MIC_GAIN } from '../store/AppStore';
 import { AppSpacing, getTheme } from '../common/Theme';
+import { VoiceMode, voiceModeLabel } from '../common/VoiceMode';
 import { PcTrayManager } from '../desktop/PcTrayManager';
 import { VoiceGainSlider } from './VoiceGainSlider';
 
@@ -15,6 +16,7 @@ export struct AccountPanel {
   onClose: () => void = () => {};
   @StorageProp('oopzIsDark') private isDark: boolean = true;
   @StorageProp('oopzThemeMode') private themeMode: string = 'system';
+  @StorageProp('oopzVoiceMode') private voiceMode: VoiceMode = 'standard';
   @StorageProp('oopzIsPc') private isPc: boolean = false;
   @StorageProp('oopzTrayOnClose') private trayOnClose: boolean = true;
 
@@ -39,6 +41,9 @@ export struct AccountPanel {
   @StorageProp('oopzCallVolumeType') private volumeType: string = '';
   @StorageProp('oopzCallInput') private callInput: string = '';
   @StorageProp('oopzCallOutput') private callOutput: string = '';
+  @StorageProp('oopzActiveVoiceMode') private activeVoiceMode: VoiceMode | '' = '';
+  @StorageProp('oopzCallProcessing') private callProcessing: string = '';
+  @StorageProp('oopzCallAecSupport') private callAecSupport: string = '';
 
   @State private notice: string = '';
   @State private busy: boolean = false;
@@ -110,6 +115,20 @@ export struct AccountPanel {
       .fontColor(this.themeMode === mode ? getTheme(this.isDark).accentText : getTheme(this.isDark).textSecondary)
       .fontWeight(this.themeMode === mode ? FontWeight.Medium : FontWeight.Normal)
       .onClick(() => { this.setTheme(mode); })
+  }
+
+  @Builder
+  private voiceModeOption(mode: VoiceMode) {
+    Button(voiceModeLabel(mode))
+      .height(32)
+      .padding({ left: 12, right: 12 })
+      .fontSize(12)
+      .borderRadius(AppSpacing.radiusSm)
+      .backgroundColor(this.voiceMode === mode ? getTheme(this.isDark).accent : getTheme(this.isDark).surfaceAlt)
+      .fontColor(this.voiceMode === mode ? getTheme(this.isDark).accentText : getTheme(this.isDark).textSecondary)
+      .fontWeight(this.voiceMode === mode ? FontWeight.Medium : FontWeight.Normal)
+      .accessibilityText(this.voiceMode === mode ? voiceModeLabel(mode) + '，已选中' : voiceModeLabel(mode))
+      .onClick(() => { this.store.setVoiceMode(this.context(), mode); })
   }
 
   @Builder
@@ -196,6 +215,17 @@ export struct AccountPanel {
       .width('100%')
       .alignItems(HorizontalAlign.Start)
 
+      Column({ space: 8 }) {
+        Text('通话模式').fontSize(14).fontColor(getTheme(this.isDark).text)
+        Row({ space: 6 }) {
+          this.voiceModeOption('standard')
+          this.voiceModeOption('native-voip')
+        }
+        Text('本机保存，下次进入语音生效').fontSize(11).fontColor(getTheme(this.isDark).textMuted)
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+
       VoiceGainSlider({
         label: '麦克风发送音量',
         value: this.micGain,
@@ -268,9 +298,19 @@ export struct AccountPanel {
         this.inCall)
       this.row('通话码率', this.callRates)
       if (this.inCall) {
-        this.row('当前麦克风', this.callInput || '由系统选择')
+        this.row('实际通话模式', this.activeVoiceMode === '' ? '正在连接' : voiceModeLabel(this.activeVoiceMode))
+        this.row('当前麦克风', this.callInput || '等待识别')
         this.row('声音输出', this.callOutput || '由系统选择')
         this.row('系统音量', this.volumeType || '等待播放流')
+        if (this.activeVoiceMode !== '') {
+          this.row('系统通话处理', this.callProcessing)
+        }
+        if (this.activeVoiceMode === 'native-voip') {
+          this.row('回声消除能力', this.callAecSupport)
+          Text('系统按设备与路由管理回声消除、降噪和自动增益。')
+            .fontSize(11)
+            .fontColor(getTheme(this.isDark).textMuted)
+        }
       }
       this.row('后台语音保活', this.taskStatus.length > 0 ? this.taskStatus : '待命')
       this.row('账号 ID', this.selfPid.length > 0 ? this.selfPid : this.uid)
