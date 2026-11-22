@@ -10,6 +10,7 @@ import { rsaEncryptPassword, rsaSignBase64 } from './OopzCrypto';
 import { md5HexUtf8 } from './Md5';
 import { httpSend, HttpResult } from './OopzHttp';
 import { extractAppId } from './OopzToken';
+import { normalizeChatText } from './OopzChatText';
 
 const LOGIN_PATH: string = '/client/v1/login/v2/login';
 const TAG: string = 'OopzNative';
@@ -382,7 +383,7 @@ function parseChatMessageRaw(item: ChatMessageRaw, areaFallback: string, channel
   const sender = asString(item.person).length > 0
     ? asString(item.person)
     : (asString(item.senderUid).length > 0 ? asString(item.senderUid) : asString(item.senderId));
-  const content = asString(item.content).length > 0 ? asString(item.content) : asString(item.text);
+  const content = normalizeChatText(item.content, item.text);
   const attachments: OopzChatAttachment[] = [];
   if (Array.isArray(item.attachments)) {
     for (const att of item.attachments) {

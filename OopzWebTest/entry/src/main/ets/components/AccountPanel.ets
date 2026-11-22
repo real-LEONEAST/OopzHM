@@ -1,7 +1,7 @@
 import { bundleManager, common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { AppStore, DEFAULT_MIC_GAIN, MAX_MIC_GAIN } from '../store/AppStore';
-import { AppSpacing, getTheme, supportsImmersiveLight } from '../common/Theme';
+import { AppSpacing, getTheme } from '../common/Theme';
 import { PcTrayManager } from '../desktop/PcTrayManager';
 import { VoiceGainSlider } from './VoiceGainSlider';
 
@@ -11,9 +11,9 @@ const TAG = 'OopzAccount';
 export struct AccountPanel {
   @Prop embedded: boolean = false;
   @Prop settingsFirst: boolean = false;
+  @Prop bottomInset: number = 0;
   onClose: () => void = () => {};
   @StorageProp('oopzIsDark') private isDark: boolean = true;
-  @StorageProp('oopzImmersiveLight') private immersiveLight: boolean = true;
   @StorageProp('oopzThemeMode') private themeMode: string = 'system';
   @StorageProp('oopzIsPc') private isPc: boolean = false;
   @StorageProp('oopzTrayOnClose') private trayOnClose: boolean = true;
@@ -25,6 +25,7 @@ export struct AccountPanel {
   @StorageProp('oopzSelfPid') private selfPid: string = '';
   @StorageProp('oopzSelfGreeting') private selfGreeting: string = '';
   @StorageProp('oopzWsConnected') private wsConnected: boolean = false;
+  @StorageProp('oopzMicCue') private micCue: boolean = false;
   @StorageProp('oopzInCall') private inCall: boolean = false;
   @StorageProp('oopzCallAreaName') private callAreaName: string = '';
   @StorageProp('oopzCallChannelName') private callChannelName: string = '';
@@ -104,7 +105,7 @@ export struct AccountPanel {
       .height(32)
       .padding({ left: 12, right: 12 })
       .fontSize(12)
-      .borderRadius(10)
+      .borderRadius(AppSpacing.radiusSm)
       .backgroundColor(this.themeMode === mode ? getTheme(this.isDark).accent : getTheme(this.isDark).surfaceAlt)
       .fontColor(this.themeMode === mode ? getTheme(this.isDark).accentText : getTheme(this.isDark).textSecondary)
       .fontWeight(this.themeMode === mode ? FontWeight.Medium : FontWeight.Normal)
@@ -175,7 +176,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
   }
 
@@ -195,24 +196,6 @@ export struct AccountPanel {
       .width('100%')
       .alignItems(HorizontalAlign.Start)
 
-      Row({ space: 12 }) {
-        Column({ space: 2 }) {
-          Text('沉浸光感').fontSize(14).fontColor(getTheme(this.isDark).text)
-          Text(supportsImmersiveLight() ? '标题栏和通话条使用轻薄系统材质' : '当前设备使用标准外观')
-            .fontSize(11)
-            .fontColor(getTheme(this.isDark).textMuted)
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.immersiveLight })
-          .accessibilityText('沉浸光感')
-          .selectedColor(getTheme(this.isDark).accent)
-          .onChange((isOn: boolean) => {
-            this.store.setImmersiveLight(this.context(), isOn);
-          })
-      }
-      .width('100%')
-
       VoiceGainSlider({
         label: '麦克风发送音量',
         value: this.micGain,
@@ -220,6 +203,15 @@ export struct AccountPanel {
         isDark: this.isDark,
         onGainChange: (gain: number, commit: boolean) => { this.store.setMicGain(this.context(), gain, commit); }
       })
+
+      Row({ space: 12 }) {
+        Text('开关麦克风提示音').layoutWeight(1).fontSize(14).fontColor(getTheme(this.isDark).text)
+        Toggle({ type: ToggleType.Switch, isOn: this.micCue })
+          .accessibilityText('开关麦克风提示音')
+          .selectedColor(getTheme(this.isDark).accent)
+          .onChange((enabled: boolean) => { this.store.setMicCue(this.context(), enabled); })
+      }
+      .width('100%')
 
       if (!this.isPc) {
         Row({ space: 8 }) {
@@ -260,7 +252,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .alignItems(HorizontalAlign.Start)
   }
@@ -287,7 +279,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .alignItems(HorizontalAlign.Start)
   }
@@ -302,7 +294,7 @@ export struct AccountPanel {
       Button(this.busy ? '正在退出…' : '退出登录')
         .width('100%')
         .height(44)
-        .borderRadius(12)
+        .borderRadius(AppSpacing.radiusSm)
         .backgroundColor(getTheme(this.isDark).dangerFill)
         .fontColor(getTheme(this.isDark).dangerText)
         .fontWeight(FontWeight.Medium)
@@ -312,7 +304,7 @@ export struct AccountPanel {
     .width('100%')
     .padding(AppSpacing.card)
     .backgroundColor(getTheme(this.isDark).surface)
-    .borderRadius(AppSpacing.radius)
+    .borderRadius(AppSpacing.radiusLg)
     .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
     .alignItems(HorizontalAlign.Start)
   }
@@ -366,7 +358,8 @@ export struct AccountPanel {
       }
       .width('100%')
       .constraintSize({ maxWidth: 620 })
-      .padding({ top: 20, bottom: this.embedded ? 20 : 120, left: AppSpacing.page, right: AppSpacing.page })
+      .padding({ top: 20, bottom: 20 + this.bottomInset,
+        left: AppSpacing.page, right: AppSpacing.page })
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')

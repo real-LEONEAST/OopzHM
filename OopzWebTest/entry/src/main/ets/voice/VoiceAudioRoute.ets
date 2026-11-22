@@ -2,6 +2,8 @@ import { common } from '@kit.AbilityKit';
 import { audio } from '@kit.AudioKit';
 import { avSession } from '@kit.AVSessionKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
+import { image } from '@kit.ImageKit';
+import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const TAG = 'OopzAudioRoute';
@@ -14,6 +16,12 @@ export class VoiceRouteStatus {
   pickerType?: 'audio' | 'voice_call';
   independentInput: boolean = false;
   mediaInput: boolean = false;
+}
+
+export interface VoiceCallCard {
+  title: string;
+  domain: string;
+  avatar: string;
 }
 
 export function isCallUsage(usage?: audio.StreamUsage): boolean {
@@ -53,12 +61,15 @@ export function voiceDeviceName(device: audio.AudioDeviceDescriptor | undefined)
 export class VoiceAudioRoute {
   private context?: common.UIAbilityContext;
   private manager?: audio.AudioSessionManager;
+  private mixing?: Promise<void>;
+  private ownsMixSession: boolean = false;
   private streamManager?: audio.AudioStreamManager;
   private session?: avSession.AVSession;
   private pickerType?: 'audio' | 'voice_call';
   private failedPickerType?: 'audio' | 'voice_call';
   private onHangUp?: () => void;
   private onToggleMute?: () => void;
+  private card?: VoiceCallCard;
   private opening?: Promise<void>;
   private updatingMute?: Promise<void>;
   private muted: boolean = false;
@@ -73,6 +84,8 @@ export class VoiceAudioRoute {
   private capturersBefore?: Set<number>;
   private rendererId?: number;
   private capturerId?: number;
+  private lastUsage?: audio.StreamUsage;
+  private lastInputSource?: audio.SourceType;
   private previous = new VoiceRouteStatus();
   private onChange?: (status: VoiceRouteStatus) => void;
 
@@ -123,21 +136,44 @@ export class VoiceAudioRoute {
     }
   }
 
-  activate(muted: boolean, onHangUp: () => void, onToggleMute?: () => void): void {
+  async activateMixing(): Promise<void> {
+    const manager = this.manager;
+    if (manager === undefined || this.context === undefined) return;
+    if (this.mixing !== undefined) return this.mixing;
+    this.mixing = (async (): Promise<void> => {
+      try {
+        if (manager.isAudioSessionActivated()) return;
+        await manager.activateAudioSession({ concurrencyMode: audio.AudioConcurrencyMode.CONCURRENCY_MIX_WITH_OTHERS });
+        this.ownsMixSession = true;
+        hilog.info(0x0, TAG, 'Concurrent app audio session activated');
+      } catch (error) {
+        hilog.info(0x0, TAG, 'Concurrent app audio unavailable, code=%{public}d', (error as BusinessError).code);
+      }
+    })();
+    try {
+      await this.mixing;
+    } finally {
+      this.mixing = undefined;
+    }
+  }
+
+  activate(muted: boolean, onHangUp: () => void, onToggleMute?: () => void, card?: VoiceCallCard): void {
     this.muted = muted;
+    this.card = card ?? { title: '语音联调', domain: '', avatar: '' };
     this.onHangUp = onHangUp;
     this.onToggleMute = onToggleMute;
     this.failedPickerType = undefined;
     this.refresh();
   }
 
-  private syncSession(usage?: audio.StreamUsage): void {
+  private syncSession(usage?: audio.StreamUsage, source?: audio.SourceType): void {
     const context = this.context;
     const hangUp = this.onHangUp;
-    const pickerType = usage === undefined || usage === audio.StreamUsage.STREAM_USAGE_UNKNOWN
-      ? (this.pickerType ?? 'voice_call')
-      : (isCallUsage(usage) ? 'voice_call' : 'audio');
-    if (context === undefined || hangUp === undefined || this.opening !== undefined ||
+    const pickerType = usage !== undefined && usage !== audio.StreamUsage.STREAM_USAGE_UNKNOWN
+      ? (isCallUsage(usage) ? 'voice_call' : 'audio')
+      : (source === audio.SourceType.SOURCE_TYPE_VOICE_COMMUNICATION ? 'voice_call' :
+        (source === audio.SourceType.SOURCE_TYPE_MIC ? 'audio' : this.pickerType));
+    if (context === undefined || hangUp === undefined || pickerType === undefined || this.opening !== undefined ||
       this.pickerType === pickerType || this.failedPickerType === pickerType) return;
     this.opening = this.openSession(context, pickerType, hangUp).finally(() => {
       this.opening = undefined;
@@ -159,18 +195,66 @@ export class VoiceAudioRoute {
         session.on('hangUp', onHangUp);
         if (this.onToggleMute !== undefined) session.on('toggleCallMute', this.onToggleMute);
       } else {
-        await session.setAVMetadata({ assetId: 'oopzhm-voice', title: 'OopzHM 语音' });
+        await this.updateMediaCard(session, context);
         await session.setAVPlaybackState({ state: avSession.PlaybackState.PLAYBACK_STATE_PLAY });
         session.on('stop', onHangUp);
       }
       await session.activate();
       this.pickerType = pickerType;
+      if (pickerType === 'audio') this.loadDomainArtwork(session);
       this.updateMute(this.muted);
       hilog.info(0x0, TAG, 'System AVSession activated, type=%{public}s', pickerType);
     } catch (error) {
       hilog.warn(0x0, TAG, 'Unable to activate call session, code=%{public}d', (error as BusinessError).code);
       this.failedPickerType = pickerType;
       await this.destroySession();
+    }
+  }
+
+  private async updateMediaCard(session: avSession.AVSession, context: common.UIAbilityContext,
+    bytes?: ArrayBuffer): Promise<void> {
+    const card = this.card;
+    if (card === undefined || this.session !== session) return;
+    const metadata: avSession.AVMetadata = {
+      assetId: 'oopzhm-voice', title: card.title, artist: card.domain, subtitle: card.domain
+    };
+    let source: image.ImageSource | undefined;
+    let cover: image.PixelMap | undefined;
+    try {
+      const data = bytes ?? (await context.resourceManager.getMediaContent($r('app.media.app_icon').id)).buffer;
+      source = image.createImageSource(data);
+      cover = await source.createPixelMap({ desiredSize: { width: 144, height: 144 } });
+      metadata.mediaImage = cover;
+    } catch {
+      // If domain artwork fails, the existing card already has the app icon.
+      if (bytes !== undefined) return;
+    } finally {
+      await source?.release().catch(() => {});
+    }
+    try {
+      if (this.session === session && this.context === context) await session.setAVMetadata(metadata);
+    } finally {
+      await cover?.release().catch(() => {});
+    }
+  }
+
+  private async loadDomainArtwork(session: avSession.AVSession): Promise<void> {
+    const context = this.context;
+    const url = this.card?.avatar ?? '';
+    if (context === undefined || !url.startsWith('https://')) return;
+    const request = http.createHttp();
+    try {
+      const response = await request.request(url, {
+        method: http.RequestMethod.GET, expectDataType: http.HttpDataType.ARRAY_BUFFER,
+        connectTimeout: 3500, readTimeout: 3500, maxLimit: 524288
+      });
+      if (response.responseCode === 200 && response.result instanceof ArrayBuffer) {
+        await this.updateMediaCard(session, context, response.result);
+      }
+    } catch {
+      // Leave the app icon in the media card when the domain image is unavailable.
+    } finally {
+      request.destroy();
     }
   }
 
@@ -195,7 +279,8 @@ export class VoiceAudioRoute {
     if (this.context === undefined) return;
     const next = new VoiceRouteStatus();
     next.pickerType = this.pickerType;
-    next.independentInput = this.enhanced && canIUse('SystemCapability.Multimedia.AVSession.AVCast');
+    next.independentInput = this.enhanced && deviceInfo.apiAvailable(20) &&
+      canIUse('SystemCapability.Multimedia.AVSession.AVInputCast');
     try {
       if (streams !== undefined && this.renderersBefore !== undefined) {
         const candidates = streams.getCurrentAudioRendererInfoArraySync().filter((info) =>
@@ -203,7 +288,8 @@ export class VoiceAudioRoute {
         const renderer = candidates.find((info) => info.streamId === this.rendererId) ??
           (candidates.length === 1 ? candidates[0] : undefined);
         this.rendererId = renderer?.streamId;
-        next.usage = renderer?.rendererInfo.usage;
+        this.lastUsage = renderer?.rendererInfo.usage ?? this.lastUsage;
+        next.usage = this.lastUsage;
         next.output = voiceDeviceName(renderer?.deviceDescriptors[0]);
       }
       if (streams !== undefined && this.capturersBefore !== undefined) {
@@ -212,7 +298,8 @@ export class VoiceAudioRoute {
         const capturer = candidates.find((info) => info.streamId === this.capturerId) ??
           (candidates.length === 1 ? candidates[0] : undefined);
         this.capturerId = capturer?.streamId;
-        next.source = capturer?.capturerInfo.source;
+        this.lastInputSource = capturer?.capturerInfo.source ?? this.lastInputSource;
+        next.source = this.lastInputSource;
         next.input = voiceDeviceName(capturer?.deviceDescriptors[0]);
         next.mediaInput = !next.independentInput && next.source === audio.SourceType.SOURCE_TYPE_MIC &&
           this.manager !== undefined && deviceInfo.apiAvailable(21);
@@ -221,7 +308,7 @@ export class VoiceAudioRoute {
       hilog.debug(0x0, TAG, 'Audio route refresh unavailable, code=%{public}d', (error as BusinessError).code);
     }
     this.publish(next);
-    this.syncSession(next.usage);
+    this.syncSession(next.usage, next.source);
   }
 
   private publish(next: VoiceRouteStatus): void {
@@ -262,6 +349,7 @@ export class VoiceAudioRoute {
     this.onChange = undefined;
     this.onHangUp = undefined;
     this.onToggleMute = undefined;
+    this.card = undefined;
     this.failedPickerType = undefined;
     const streams = this.streamManager;
     this.streamManager = undefined;
@@ -293,12 +381,19 @@ export class VoiceAudioRoute {
     this.capturersBefore = undefined;
     this.rendererId = undefined;
     this.capturerId = undefined;
+    this.lastUsage = undefined;
+    this.lastInputSource = undefined;
     this.enhanced = false;
     this.previous = new VoiceRouteStatus();
     await this.selectingMediaInput?.catch(() => {});
     if (this.selectedMediaInput) {
       await this.manager?.clearSelectedMediaInputDevice().catch(() => {});
       this.selectedMediaInput = false;
+    }
+    await this.mixing;
+    if (this.ownsMixSession) {
+      this.ownsMixSession = false;
+      await this.manager?.deactivateAudioSession().catch(() => {});
     }
     this.manager = undefined;
     await this.opening;
