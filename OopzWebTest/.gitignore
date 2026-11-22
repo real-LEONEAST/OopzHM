@@ -1,0 +1,13 @@
+.hvigor/
+.build-cache/
+.idea/
+.sign/
+**/build/
+**/oh_modules/
+tools/node_modules/
+*.credentials.json
+local.properties
+*.cer
+*.csr
+*.p12
+*.p7b

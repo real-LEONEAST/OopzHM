@@ -1,0 +1,25 @@
+# 本机工作树和构建缓存
+/.worktrees/
+/.build-cache/
+/.hvigor/
+/work/
+
+# 已下载的对照安装包和鸿蒙打包产物
+/oopz_setup_*.exe
+/oopz-*.apk
+*.hap
+*.app
+
+# 本机环境与授权材料
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.credentials.json
+*.pem
+*.key
+*.keystore
+*.jks
+*.pfx
+/OopzWebTest/build-profile.json5
+/OopzWebTest/entry/src/main/ets/oopz/OopzKeyMaterial.ets

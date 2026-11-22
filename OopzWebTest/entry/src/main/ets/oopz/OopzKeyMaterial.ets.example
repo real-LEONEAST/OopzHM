@@ -1,0 +1,12 @@
+// 编译用占位配置。原生登录和语音联调需使用获授权的本机配置。
+export const OOPZ_SIGNING_KEY_PEM: string = '';
+export const OOPZ_PASSWORD_MODULUS_HEX: string = '';
+export const OOPZ_SIGNING_KEY_BITS: number = 0;
+export const OOPZ_PASSWORD_KEY_BITS: number = 0;
+export const OOPZ_CLIENT_VERSION: string = '';
+export const OOPZ_APP_VERSION_NUMBER: string = '';
+export const OOPZ_API_BASE: string = '';
+export const OOPZ_PLATFORM: string = '';
+export const OOPZ_CHANNEL: string = '';
+export const OOPZ_TEST_TOKEN: string = '';
+export const OOPZ_TEST_APPID: string = '';

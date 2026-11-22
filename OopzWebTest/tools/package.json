@@ -1,0 +1,10 @@
+{
+  "name": "oopz-web-test-tools",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "oopz-sdk": "0.2.0"
+  }
+}
