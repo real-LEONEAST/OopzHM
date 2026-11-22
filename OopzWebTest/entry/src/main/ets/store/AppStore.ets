@@ -28,6 +28,11 @@ export type PresenceListener = (areaId: string, channelId: string) => void;
 export type ChatListener = (channelId: string) => void;
 export type AreaAdminListener = (areaId: string, reason: string) => void;
 
+interface AreaChannels {
+  groups: OopzChannelGroup[];
+  channels: OopzVoiceChannel[];
+}
+
 export const DEFAULT_MIC_GAIN = 100;
 export const MAX_MIC_GAIN = 150;
 export const MAX_MEMBER_GAIN = 200;
@@ -52,6 +57,9 @@ export class AppStore {
   readonly channelsByArea: Map<string, OopzVoiceChannel[]> = new Map<string, OopzVoiceChannel[]>();
   readonly areaDetailById: Map<string, OopzAreaDetail> = new Map<string, OopzAreaDetail>();
   readonly channelGroupsByArea: Map<string, OopzChannelGroup[]> = new Map<string, OopzChannelGroup[]>();
+  private selectedChannelArea: string = '';
+  private channelReadSequence: number = 0;
+  private readonly latestChannelRead: Map<string, number> = new Map<string, number>();
   readonly membersByChannel: Map<string, OopzChannelMember[]> = new Map<string, OopzChannelMember[]>();
   readonly messagesByChannel: Map<string, OopzChatMessage[]> = new Map<string, OopzChatMessage[]>();
   readonly personByUid: Map<string, OopzPersonInfo> = new Map<string, OopzPersonInfo>();
@@ -404,6 +412,8 @@ export class AppStore {
     this.areas = [];
     this.channels = [];
     this.channelsByArea.clear();
+    this.selectedChannelArea = '';
+    this.latestChannelRead.clear();
     this.areaDetailById.clear();
     this.channelGroupsByArea.clear();
     this.membersByChannel.clear();
@@ -464,13 +474,8 @@ export class AppStore {
   }
 
   async loadChannels(areaId: string): Promise<OopzVoiceChannel[]> {
-    const channels = await this.session.channels(areaId);
-    this.channels = channels;
-    this.channelsByArea.set(areaId, channels);
-    const voiceChannels = channels.filter((c: OopzVoiceChannel): boolean =>
-      c.type === 'VOICE' || c.type === 'AUDIO');
-    await this.loadAreaPresence(areaId, voiceChannels);
-    return channels;
+    this.selectedChannelArea = areaId;
+    return (await this.readAreaChannels(areaId)).channels;
   }
 
   async loadAreaPresence(areaId: string, channels: OopzVoiceChannel[]): Promise<void> {
@@ -647,14 +652,23 @@ export class AppStore {
         return cached;
       }
     }
+    const cred = this.session.getCred();
     const detail = await this.admin.getAreaDetail(areaId);
+    if (this.session.getCred() !== cred) {
+      throw new Error('Oopz 会话已切换');
+    }
     this.areaDetailById.set(areaId, detail);
     return detail;
   }
 
   async loadChannelGroups(areaId: string): Promise<OopzChannelGroup[]> {
+    return (await this.readAreaChannels(areaId)).groups;
+  }
+
+  private async readAreaChannels(areaId: string): Promise<AreaChannels> {
+    const sequence = ++this.channelReadSequence;
+    this.latestChannelRead.set(areaId, sequence);
     const groups = await this.admin.getChannelGroups(areaId);
-    this.channelGroupsByArea.set(areaId, groups);
     const flat: OopzVoiceChannel[] = [];
     for (let i = 0; i < groups.length; i++) {
       const g = groups[i];
@@ -665,11 +679,50 @@ export class AppStore {
         }
       }
     }
-    this.channels = flat;
-    this.channelsByArea.set(areaId, flat);
-    const voiceChannels = flat.filter((c: OopzVoiceChannel): boolean => c.type === 'VOICE' || c.type === 'AUDIO');
-    await this.loadAreaPresence(areaId, voiceChannels);
-    return groups;
+    if (this.latestChannelRead.get(areaId) === sequence) {
+      this.channelGroupsByArea.set(areaId, groups);
+      this.channelsByArea.set(areaId, flat);
+      if (areaId === this.selectedChannelArea) this.channels = flat;
+      await this.loadAreaPresence(areaId, flat);
+    }
+    return { groups: groups, channels: flat };
+  }
+
+  private async requireGroupManagement(areaId: string): Promise<void> {
+    const detail = await this.loadAreaDetail(areaId, true);
+    if (detail.areaId !== areaId || !hasAreaPrivilege(detail, OopzPrivilege.MANAGE_GROUP)) {
+      throw new Error('缺少域权限：管理分类（MANAGE_GROUP）');
+    }
+  }
+
+  private async refreshAfterGroupChange(areaId: string, reason: string): Promise<void> {
+    this.channelGroupsByArea.delete(areaId);
+    this.channelsByArea.delete(areaId);
+    try {
+      await this.loadChannelGroups(areaId);
+    } catch {
+      // The write already succeeded. A later list read can retry without repeating it.
+      hilog.warn(0x0, TAG, 'Unable to reload groups after %{public}s', reason);
+    }
+    this.areaAdminListener?.(areaId, reason);
+  }
+
+  async createChannelGroup(areaId: string, name: string): Promise<void> {
+    await this.requireGroupManagement(areaId);
+    await this.admin.createChannelGroup(areaId, name);
+    await this.refreshAfterGroupChange(areaId, 'group_create');
+  }
+
+  async renameChannelGroup(areaId: string, groupId: string, name: string): Promise<void> {
+    await this.requireGroupManagement(areaId);
+    await this.admin.renameChannelGroup(areaId, groupId, name);
+    await this.refreshAfterGroupChange(areaId, 'group_update');
+  }
+
+  async deleteChannelGroup(areaId: string, groupId: string): Promise<void> {
+    await this.requireGroupManagement(areaId);
+    await this.admin.deleteChannelGroup(areaId, groupId);
+    await this.refreshAfterGroupChange(areaId, 'group_delete');
   }
 
   async createChannel(options: CreateChannelOptions): Promise<CreateChannelResult> {

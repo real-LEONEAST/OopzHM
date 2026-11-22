@@ -282,6 +282,12 @@ interface RawAreaUserDetailEnvelope {
   data?: RawAreaUserDetailData;
 }
 
+interface GroupNameBody {
+  name: string;
+  area: string;
+  id?: string;
+}
+
 interface CreateChannelBody {
   area: string;
   name: string;
@@ -490,11 +496,7 @@ export function mapVoiceMuteIntervalId(durationSeconds: number): number {
   return 12;
 }
 
-/**
- * Area administrator & moderation service.
- * Note: Category/group CRUD endpoints (MANAGE_GROUP) are not yet documented in oopz-sdk
- * and will be added here once captured from web.oopz.cn.
- */
+/** Area structure and moderation requests for the signed-in account. */
 export class OopzAreaAdmin {
   private readonly session: OopzSession;
 
@@ -571,7 +573,7 @@ export class OopzAreaAdmin {
           channelId: channelId,
           name: asStr(ch.name).length > 0 ? asStr(ch.name) : channelId,
           group: groupName,
-          type: chType.length > 0 ? chType : 'TEXT',
+          type: chType,
           maxMember: maxMember,
           voiceQuality: voiceQuality.length > 0 ? voiceQuality : '64k',
           secret: ch.secret === true,
@@ -682,6 +684,29 @@ export class OopzAreaAdmin {
       score: typeof data.score === 'number' ? data.score : 0,
       roles: parseRoles(rawRoles)
     };
+  }
+
+  async createChannelGroup(areaId: string, name: string): Promise<void> {
+    this.requireArg(areaId, 'areaId');
+    this.requireArg(name, 'name');
+    const body: GroupNameBody = { name: name.trim(), area: areaId };
+    await this.session.signedRequestVoid('/client/v1/area/v1/group/v1/create', 'POST', JSON.stringify(body));
+  }
+
+  async renameChannelGroup(areaId: string, groupId: string, name: string): Promise<void> {
+    this.requireArg(areaId, 'areaId');
+    this.requireArg(groupId, 'groupId');
+    this.requireArg(name, 'name');
+    const body: GroupNameBody = { name: name.trim(), id: groupId, area: areaId };
+    await this.session.signedRequestVoid('/client/v1/area/v1/group/v1/change', 'PUT', JSON.stringify(body));
+  }
+
+  async deleteChannelGroup(areaId: string, groupId: string): Promise<void> {
+    this.requireArg(areaId, 'areaId');
+    this.requireArg(groupId, 'groupId');
+    const path = '/client/v1/area/v1/group/v1/delete?id=' + encodeURIComponent(groupId) +
+      '&area=' + encodeURIComponent(areaId);
+    await this.session.signedRequestVoid(path, 'DELETE');
   }
 
   async createChannel(options: CreateChannelOptions): Promise<CreateChannelResult> {
