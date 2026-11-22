@@ -25,7 +25,7 @@ const UI_PREF_NAME: string = 'oopz_ui_prefs';
 const GRIP_STABILITY_MS: number = 500;
 
 export type PresenceListener = (areaId: string, channelId: string) => void;
-export type ChatListener = (channelId: string) => void;
+export type ChatListener = (channelId: string, change: 'history' | 'append' | 'recall', messageId?: string) => void;
 export type AreaAdminListener = (areaId: string, reason: string) => void;
 
 interface AreaChannels {
@@ -62,6 +62,8 @@ export class AppStore {
   private readonly latestChannelRead: Map<string, number> = new Map<string, number>();
   readonly membersByChannel: Map<string, OopzChannelMember[]> = new Map<string, OopzChannelMember[]>();
   readonly messagesByChannel: Map<string, OopzChatMessage[]> = new Map<string, OopzChatMessage[]>();
+  private readonly recalledIds: Map<string, Set<string>> = new Map<string, Set<string>>();
+  private readonly pendingRecalls: Map<string, OopzCred> = new Map<string, OopzCred>();
   readonly personByUid: Map<string, OopzPersonInfo> = new Map<string, OopzPersonInfo>();
   readonly personByPid: Map<number, OopzPersonInfo> = new Map<number, OopzPersonInfo>();
 
@@ -418,6 +420,8 @@ export class AppStore {
     this.channelGroupsByArea.clear();
     this.membersByChannel.clear();
     this.messagesByChannel.clear();
+    this.recalledIds.clear();
+    this.pendingRecalls.clear();
     this.personByUid.clear();
     this.personByPid.clear();
     this.syncCredStorage(undefined);
@@ -507,65 +511,87 @@ export class AppStore {
     if (areaId.length === 0 || channelId.length === 0) {
       return [];
     }
+    const cred = this.session.getCred();
+    const previous = this.messagesByChannel.get(channelId) ?? [];
     const fetched = await this.session.getChannelMessages(areaId, channelId, 30, before);
-    const existing = before !== undefined && before.length > 0 ? (this.messagesByChannel.get(channelId) ?? []) : [];
-    const merged: OopzChatMessage[] = [];
-    const seen = new Set<string>();
-    const combined = before !== undefined && before.length > 0 ? fetched.concat(existing) : fetched;
-    const uids: string[] = [];
-    for (const msg of combined) {
-      const key = msg.messageId.length > 0 ? msg.messageId : msg.clientMessageId;
-      if (key.length > 0) {
-        if (seen.has(key)) continue;
-        seen.add(key);
-      }
-      merged.push(msg);
-      if (msg.senderUid.length > 0 && uids.indexOf(msg.senderUid) < 0) {
-        uids.push(msg.senderUid);
-      }
-    }
-    merged.sort((a: OopzChatMessage, b: OopzChatMessage): number => a.timestampMs - b.timestampMs);
-    this.messagesByChannel.set(channelId, merged);
-    await this.ensurePersons(uids);
-    this.chatListener?.(channelId);
-    return merged;
+    if (this.session.getCred() !== cred) return [];
+    const current = this.messagesByChannel.get(channelId) ?? [];
+    const existing = before ? current : current.filter((msg: OopzChatMessage): boolean => !previous.includes(msg));
+    const merged = this.updateChatCache(channelId, fetched.concat(existing));
+    await this.ensurePersons(merged.map((msg: OopzChatMessage): string => msg.senderUid));
+    if (this.session.getCred() !== cred) return [];
+    this.chatListener?.(channelId, 'history');
+    return this.messagesByChannel.get(channelId) ?? [];
   }
 
   async sendChannelMessage(areaId: string, channelId: string, text: string): Promise<OopzChatMessage> {
+    const cred = this.session.getCred();
     const sent = await this.session.sendChannelMessage(areaId, channelId, text);
+    if (this.session.getCred() !== cred) return sent;
     this.appendMessage(channelId, sent);
-    this.chatListener?.(channelId);
+    this.chatListener?.(channelId, 'append');
     return sent;
   }
 
   private appendMessage(channelId: string, msg: OopzChatMessage): void {
-    const current = (this.messagesByChannel.get(channelId) ?? []).slice();
-    const exists = current.some((item: OopzChatMessage): boolean =>
-      (msg.messageId.length > 0 && item.messageId === msg.messageId) ||
-      (msg.clientMessageId.length > 0 && item.clientMessageId === msg.clientMessageId));
-    if (!exists) {
-      current.push(msg);
-      current.sort((a: OopzChatMessage, b: OopzChatMessage): number => a.timestampMs - b.timestampMs);
-      this.messagesByChannel.set(channelId, current);
+    this.updateChatCache(channelId, (this.messagesByChannel.get(channelId) ?? []).concat([msg]));
+  }
+
+  private clientMessageKey(msg: OopzChatMessage): string {
+    return msg.clientMessageId ? 'client/' + msg.senderUid + '/' + msg.clientMessageId : '';
+  }
+
+  private updateChatCache(channelId: string, messages: OopzChatMessage[]): OopzChatMessage[] {
+    const recalled = this.recalledIds.get(channelId);
+    const serverByClient = new Map<string, string>();
+    // A recall can arrive before the send acknowledgement that links the two IDs.
+    for (const msg of messages) {
+      if (!msg.messageId || !msg.clientMessageId) continue;
+      const clientKey = this.clientMessageKey(msg);
+      serverByClient.set(clientKey, msg.messageId);
+      if (recalled?.has(msg.messageId)) recalled.add(clientKey);
     }
+    const merged: OopzChatMessage[] = [];
+    const positions = new Map<string, number>();
+    for (const msg of messages) {
+      const clientKey = this.clientMessageKey(msg);
+      const key = msg.messageId || serverByClient.get(clientKey) || clientKey;
+      if (recalled?.has(key) || recalled?.has(clientKey)) continue;
+      const index = positions.get(key);
+      if (index === undefined) {
+        if (key) positions.set(key, merged.length);
+        merged.push(msg);
+      } else if (msg.messageId && (!merged[index].messageId || (!merged[index].clientMessageId && msg.clientMessageId))) {
+        merged[index] = msg;
+      }
+    }
+    merged.sort((a: OopzChatMessage, b: OopzChatMessage): number => a.timestampMs - b.timestampMs);
+    this.messagesByChannel.set(channelId, merged);
+    return merged;
   }
 
   private async handleIncomingMessage(message: OopzChatMessage): Promise<void> {
+    const cred = this.session.getCred();
     if (message.senderUid.length > 0) {
       await this.ensurePersons([message.senderUid]);
     }
+    if (this.session.getCred() !== cred) return;
     this.appendMessage(message.channelId, message);
-    this.chatListener?.(message.channelId);
+    this.chatListener?.(message.channelId, 'append');
   }
 
   private handleMessageRecall(_areaId: string, channelId: string, messageId: string): void {
+    if (!channelId || !messageId) return;
+    const ids = this.recalledIds.get(channelId) ?? new Set<string>();
+    if (ids.has(messageId)) return;
+    ids.add(messageId);
+    this.recalledIds.set(channelId, ids);
     const current = this.messagesByChannel.get(channelId);
     if (current === undefined) {
       return;
     }
-    const filtered = current.filter((m: OopzChatMessage): boolean => m.messageId !== messageId);
-    this.messagesByChannel.set(channelId, filtered);
-    this.chatListener?.(channelId);
+    this.updateChatCache(channelId, current);
+    this.chatListener?.(channelId, 'recall', messageId);
   }
 
   async ensurePersons(uids: string[]): Promise<void> {
@@ -747,8 +773,22 @@ export class AppStore {
   }
 
   async recallChannelMessage(areaId: string, channelId: string, messageId: string): Promise<void> {
-    await this.admin.recallMessage(areaId, channelId, messageId);
-    this.handleMessageRecall(areaId, channelId, messageId);
+    const cred = this.session.getCred();
+    const msg = this.messagesByChannel.get(channelId)?.find((m: OopzChatMessage): boolean => m.messageId === messageId);
+    if (!cred || !cred.personUid || !messageId || !msg || (msg.areaId && msg.areaId !== areaId)) {
+      throw new Error('这条消息已不可撤回');
+    }
+    if (msg.senderUid !== cred.personUid) throw new Error('只能撤回自己发送的消息');
+    const key = channelId + '/' + messageId;
+    if (this.pendingRecalls.has(key)) throw new Error('正在撤回消息');
+    this.pendingRecalls.set(key, cred);
+    try {
+      if (this.recalledIds.get(channelId)?.has(messageId)) return;
+      await this.admin.recallMessage(areaId, channelId, messageId);
+      if (this.session.getCred() === cred) this.handleMessageRecall(areaId, channelId, messageId);
+    } finally {
+      if (this.pendingRecalls.get(key) === cred) this.pendingRecalls.delete(key);
+    }
   }
 
   async kickFromVoiceChannel(areaId: string, channelId: string, targetUid: string): Promise<void> {
