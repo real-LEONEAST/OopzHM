@@ -903,7 +903,7 @@ export class OopzSession {
     const msgId = asString(data.messageId).length > 0 ? asString(data.messageId) : asString(data.message_id);
     const tsRaw = data.timestamp !== undefined ? data.timestamp : data.time;
     return {
-      messageId: msgId.length > 0 ? msgId : clientMessageId,
+      messageId: msgId,
       clientMessageId: clientMessageId,
       areaId: areaId,
       channelId: channelId,

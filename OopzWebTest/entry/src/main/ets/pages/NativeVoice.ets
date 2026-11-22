@@ -5,6 +5,7 @@ import { AVInputCastPicker, AVCastPickerState } from '@kit.AVSessionKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
+import { KeyCode } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { PRODUCT_NAME } from 'BuildProfile';
 import type { AudioVolumeInfo, NativeRtcCall, RtcCallEvents, RtcRoom } from '../voice/NativeRtcCall';
@@ -20,6 +21,9 @@ import { AccountPanel } from '../components/AccountPanel';
 import { AreaAdminPanel, canOpenAreaAdmin } from '../components/AreaAdminPanel';
 import { BottomBar, BOTTOM_BAR_INSET } from '../components/BottomBar';
 import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
+import { ChatMessageItem, ChatMessageRow, ChatRecallOverlay, ChatTextRun } from '../components/ChatMessageRow';
+import { ChatImagePreview } from '../components/ChatImagePreview';
+import { OopzPrivilege } from '../oopz/OopzAreaAdmin';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
 import { VoiceOutputPicker } from '../components/VoiceDevices';
 import { AppSpacing, getTheme, nativePopupMaterial } from '../common/Theme';
@@ -47,6 +51,11 @@ const REMOTE_SPEECH_SAMPLE_WINDOW_MS = 360;
 const INITIAL_PEER_SYNC_MS = 1600;
 
 type MobilePane = 'channels' | 'room' | 'account';
+
+interface ChatAnchor {
+  key: string;
+  y: number;
+}
 
 interface ChannelMemberPreview {
   uid: string;
@@ -89,24 +98,6 @@ function isDomainHome(channel: ChannelCard): boolean {
   }
   const group = channel.group.trim();
   return group === '' || group === '无分类' || group === '未分类';
-}
-
-interface ChatMessageItem {
-  key: string;
-  messageId: string;
-  senderUid: string;
-  senderName: string;
-  senderAvatar: string;
-  isSelf: boolean;
-  timeText: string;
-  cleanText: string;
-  textRuns: ChatTextRun[];
-  attachments: OopzChatAttachment[];
-}
-
-interface ChatTextRun {
-  text: string;
-  oopzEmoji: boolean;
 }
 
 function splitOopzEmojiRuns(text: string): ChatTextRun[] {
@@ -311,97 +302,6 @@ struct MemberRow {
   }
 }
 
-@Component
-struct ChatMessageRow {
-  @Prop item: ChatMessageItem;
-  @Prop isDark: boolean = true;
-  @Prop oopzEmojiFontReady: boolean = false;
-
-  build() {
-    Row({ space: 10 }) {
-      Stack() {
-        Column() {
-          Text(this.item.senderName.length > 0 ? this.item.senderName.slice(0, 1).toUpperCase() : 'U')
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(getTheme(this.isDark).accent)
-        }
-        .width(34)
-        .height(34)
-        .borderRadius(17)
-        .backgroundColor(getTheme(this.isDark).surfaceAlt)
-        .justifyContent(FlexAlign.Center)
-
-        if (this.item.senderAvatar.length > 0) {
-          Image(this.item.senderAvatar)
-            .width(34)
-            .height(34)
-            .borderRadius(17)
-            .objectFit(ImageFit.Cover)
-        }
-      }
-      .width(34)
-      .height(34)
-
-      Column({ space: 4 }) {
-        Row({ space: 8 }) {
-          Text(this.item.senderName)
-            .fontSize(13)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(this.item.isSelf ? getTheme(this.isDark).accent : getTheme(this.isDark).text)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(this.item.timeText)
-            .fontSize(11)
-            .fontColor(getTheme(this.isDark).textMuted)
-        }
-
-        if (this.item.cleanText.length > 0) {
-          Text() {
-            if (this.item.textRuns.length === 0) {
-              Span(this.item.cleanText)
-            } else {
-              ForEach(this.item.textRuns, (run: ChatTextRun) => {
-                if (run.oopzEmoji && this.oopzEmojiFontReady) {
-                  Span(run.text).fontFamily(OOPZ_EMOJI_FONT_FAMILY).fontSize(21)
-                } else {
-                  Span(run.oopzEmoji ? '[表情]' : run.text).fontSize(14)
-                }
-              }, (run: ChatTextRun, index: number) => `${index}-${run.text}-${this.oopzEmojiFontReady}`)
-            }
-          }
-            .fontSize(14)
-            .fontColor(getTheme(this.isDark).text)
-            .lineHeight(this.item.textRuns.length > 0 ? 27 : 20)
-            .copyOption(CopyOptions.InApp)
-            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-            .borderRadius(AppSpacing.radiusSm)
-            .backgroundColor(this.item.isSelf ? getTheme(this.isDark).tint : getTheme(this.isDark).surface)
-            .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
-        }
-
-        if (this.item.attachments.length > 0) {
-          Column({ space: 6 }) {
-            ForEach(this.item.attachments, (att: OopzChatAttachment, idx: number) => {
-              Image(att.url)
-                .constraintSize({ maxWidth: 260, maxHeight: 200 })
-                .borderRadius(12)
-                .objectFit(ImageFit.Cover)
-                .border({ width: 1, color: getTheme(this.isDark).borderSubtle })
-            }, (att: OopzChatAttachment, idx: number) => `${att.fileKey}_${idx}_${att.url}`)
-          }
-          .alignItems(HorizontalAlign.Start)
-        }
-      }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Top)
-    .padding({ top: 4, bottom: 4 })
-  }
-}
-
 @Entry
 @Component
 struct NativeVoice {
@@ -429,6 +329,22 @@ struct NativeVoice {
   @State private roomMembers: RoomMemberModel[] = [];
   @State private chatMessages: ChatMessageItem[] = [];
   @State private chatInput: string = '';
+  @State private recallItem?: ChatMessageItem = undefined;
+  @State private previewImage?: OopzChatAttachment = undefined;
+  @State private recallConfirming: boolean = false;
+  @State private recallBusy: boolean = false;
+  @State private canRecallOthers: boolean = false;
+  private menuX: number = 0;
+  private menuY: number = 0;
+  private actionMessageId: string = '';
+  private actionSourceKey: string = '';
+  private actionSelfUid: string = '';
+  private actionChannel: string = '';
+  private actionArea: string = '';
+  private chatInteraction: number = 0;
+  private chatFirstVisible: number = 0;
+  private chatLastVisible: number = 0;
+  private anchors: ChatAnchor[] = [];
   @State private oopzEmojiFontReady: boolean = false;
   @State private oopzEmojiFontLoading: boolean = false;
   @State private loadingChat: boolean = false;
@@ -529,9 +445,13 @@ struct NativeVoice {
         this.syncViewModels();
       }
     });
-    this.store.setChatListener((channelId: string) => {
+    this.store.setChatListener((channelId: string, change: string, messageId?: string) => {
       if (channelId === this.selectedChannelId) {
-        this.syncChatMessages(true);
+        if (this.hasChatAction()) {
+          if (change === 'recall' && messageId === this.actionMessageId) this.closeChatAction();
+          return;
+        }
+        this.syncChatMessages(change === 'append' && this.chatLastVisible >= this.chatMessages.length - 1);
       }
     });
     this.store.setAreaAdminListener((areaId: string, reason: string) => {
@@ -539,6 +459,8 @@ struct NativeVoice {
       if (reason === 'area' || reason === 'role') {
         this.adminPermissionRead++;
         this.canManageArea = canOpenAreaAdmin(this.store.getAreaDetail(areaId));
+        this.canRecallOthers = this.store.hasAreaPrivilege(areaId, OopzPrivilege.RECALL_MESSAGE);
+        if (this.recallItem && !this.recallItem.isSelf && !this.canRecallOthers) this.closeChatAction();
         if (!this.canManageArea) this.areaAdminOpen = false;
       } else if (reason.startsWith('group_') || reason.startsWith('channel_')) {
         this.syncAdminChannels(areaId);
@@ -563,6 +485,7 @@ struct NativeVoice {
   }
 
   aboutToDisappear(): void {
+    this.closeChatAction(false);
     this.restoreDesktopCaption();
     this.activePage = false;
     this.store.setGripInteractionActive('voice-input-menu', false);
@@ -609,6 +532,10 @@ struct NativeVoice {
   }
 
   private backToParent(): boolean {
+    if (this.hasChatAction()) {
+      if (!this.recallBusy) this.closeChatAction();
+      return true;
+    }
     if (this.areaAdminOpen) {
       if (this.adminBack !== undefined) this.adminBack();
       else this.closeAreaAdmin();
@@ -967,7 +894,11 @@ struct NativeVoice {
     if (areaId.length === 0) return;
     this.rememberChannelPosition();
     this.emojiPickerOpen = false;
-    if (this.selectedAreaId !== areaId) this.canManageArea = false;
+    if (this.selectedAreaId !== areaId) {
+      this.canManageArea = false;
+      this.canRecallOthers = false;
+    }
+    this.closeChatAction(false);
     this.areaAdminOpen = false;
     if (advanceMobile) this.mobilePane = 'channels';
     this.selectedAreaId = areaId;
@@ -997,6 +928,7 @@ struct NativeVoice {
   }
 
   private selectChannel(channelId: string): void {
+    this.closeChatAction(false);
     this.areaAdminOpen = false;
     this.rememberChannelPosition();
     this.emojiPickerOpen = false;
@@ -1023,6 +955,7 @@ struct NativeVoice {
   }
 
   private async loadSelectedChat(before?: string): Promise<void> {
+    const interaction = this.chatInteraction;
     const areaId = this.selectedAreaId;
     const ch = this.selectedChannelObj;
     if (areaId.length === 0 || ch === undefined || ch.type !== 'TEXT' || this.loadingChat) {
@@ -1032,7 +965,7 @@ struct NativeVoice {
     try {
       await this.store.loadChannelMessages(areaId, ch.channelId, before);
       if (this.selectedChannelId === ch.channelId) {
-        this.syncChatMessages(before === undefined);
+        this.syncChatMessages(before === undefined && interaction === this.chatInteraction);
       }
     } catch (error) {
       this.notice = (error as Error).message;
@@ -1060,10 +993,11 @@ struct NativeVoice {
       return;
     }
     this.sendingChat = true;
+    const draft = this.chatInput;
     this.notice = '';
     try {
       await this.store.sendChannelMessage(areaId, ch.channelId, text);
-      this.chatInput = '';
+      if (this.chatInput === draft && this.selectedChannelId === ch.channelId) this.chatInput = '';
       this.syncChatMessages(true);
     } catch (error) {
       this.notice = (error as Error).message;
@@ -1073,6 +1007,7 @@ struct NativeVoice {
   }
 
   private syncChatMessages(scrollToBottom: boolean = false): void {
+    if (this.hasChatAction()) return;
     const chId = this.selectedChannelId;
     if (chId.length === 0) {
       this.chatMessages = [];
@@ -1105,13 +1040,104 @@ struct NativeVoice {
     this.chatMessages = items;
     if (items.some((item: ChatMessageItem) => item.textRuns.length > 0)) this.loadOopzEmojiFont();
     if (scrollToBottom && items.length > 0) {
+      const interaction = this.chatInteraction;
       setTimeout(() => {
+        if (interaction !== this.chatInteraction || this.selectedChannelId !== chId || !this.activePage) return;
         try {
           this.chatScroller.scrollToIndex(items.length - 1, false, ScrollAlign.END);
         } catch {
           // ignore if not attached yet
         }
       }, 60);
+    }
+  }
+
+  private hasChatAction(): boolean {
+    return this.recallItem !== undefined || this.previewImage !== undefined;
+  }
+
+  private beginChatAction(msg: ChatMessageItem): void {
+    this.chatInteraction++;
+    this.actionArea = this.selectedAreaId;
+    this.actionChannel = this.selectedChannelId;
+    this.actionMessageId = msg.messageId;
+    this.actionSourceKey = msg.key;
+    this.actionSelfUid = this.store.session.getCred()?.personUid ?? '';
+    this.anchors = [];
+    for (let i = this.chatFirstVisible; i >= 0 && i <= this.chatLastVisible && i < this.chatMessages.length; i++) {
+      const rect = this.chatScroller.getItemRect(i);
+      if (rect.height > 0) this.anchors.push({ key: this.chatMessages[i].key, y: rect.y });
+    }
+  }
+
+  private openRecallMenu(msg: ChatMessageItem, x: number, y: number): void {
+    if (this.hasChatAction() || !msg.messageId || (!msg.isSelf && !this.canRecallOthers)) return;
+    this.beginChatAction(msg);
+    this.menuX = x;
+    this.menuY = y;
+    this.recallItem = msg;
+  }
+
+  private openChatImage(msg: ChatMessageItem, image: OopzChatAttachment): void {
+    if (this.hasChatAction() || !image.url) return;
+    this.beginChatAction(msg);
+    this.previewImage = image;
+  }
+
+  private closeChatAction(restore: boolean = true): void {
+    const interaction = ++this.chatInteraction;
+    if (!this.hasChatAction()) return;
+    const channelId = this.actionChannel;
+    const sourceKey = this.actionSourceKey;
+    this.recallItem = undefined;
+    this.recallConfirming = false;
+    this.recallBusy = false;
+    this.previewImage = undefined;
+    if (!restore || channelId !== this.selectedChannelId || this.actionArea !== this.selectedAreaId) return;
+    const saved = this.anchors;
+    this.syncChatMessages();
+    // The list stays mounted. Correct only an actual displacement (for example,
+    // if a visible row was recalled while a newer page of history arrived).
+    setTimeout(() => {
+      if (interaction !== this.chatInteraction || channelId !== this.selectedChannelId || !this.activePage) return;
+      const anchor = saved.find((a: ChatAnchor): boolean => this.chatMessages.some((m: ChatMessageItem): boolean =>
+        m.key === a.key));
+      if (anchor !== undefined) {
+        const index = this.chatMessages.findIndex((m: ChatMessageItem): boolean => m.key === anchor.key);
+        const rect = this.chatScroller.getItemRect(index);
+        if (rect.height > 0) {
+          if (Math.abs(rect.y - anchor.y) > 0.5) this.chatScroller.scrollBy(0, rect.y - anchor.y);
+        } else {
+          this.chatScroller.scrollToIndex(index, false, ScrollAlign.START);
+          this.chatScroller.scrollBy(0, -anchor.y);
+        }
+      }
+      if (this.isPc) {
+        const index = this.chatMessages.findIndex((m: ChatMessageItem): boolean => m.key === sourceKey);
+        const key = index >= 0 && this.chatScroller.getItemRect(index).height > 0 ? sourceKey : anchor?.key;
+        if (key) focusControl.requestFocus('chat-message-' + key);
+      }
+    }, 32);
+  }
+
+  private async submitChatRecall(): Promise<void> {
+    const msg = this.recallItem;
+    if (!msg || !this.recallConfirming || this.recallBusy) return;
+    if (this.actionSelfUid !== this.store.session.getCred()?.personUid || this.actionArea !== this.selectedAreaId ||
+      this.actionChannel !== this.selectedChannelId) {
+      this.closeChatAction(false);
+      return;
+    }
+    const interaction = this.chatInteraction;
+    this.recallBusy = true;
+    try {
+      await this.store.recallChannelMessage(this.actionArea, this.actionChannel, msg.messageId);
+      if (interaction === this.chatInteraction) this.closeChatAction();
+    } catch (error) {
+      if (interaction === this.chatInteraction) {
+        this.closeChatAction();
+        this.getUIContext().getPromptAction().showToast({ message: (error as Error).message });
+      }
     }
   }
 
@@ -1143,14 +1169,17 @@ struct NativeVoice {
   private async refreshAdminPermission(areaId: string): Promise<void> {
     const read = ++this.adminPermissionRead;
     let allowed = false;
+    let recallOthers = false;
     try {
       const detail = await this.store.loadAreaDetail(areaId, true);
       allowed = detail.areaId === areaId && canOpenAreaAdmin(detail);
+      recallOthers = detail.areaId === areaId && this.store.hasAreaPrivilege(areaId, OopzPrivilege.RECALL_MESSAGE);
     } catch {
       // Browsing the area remains available when its management permissions cannot be read.
     }
     if (this.activePage && this.selectedAreaId === areaId && read === this.adminPermissionRead) {
       this.canManageArea = allowed;
+      this.canRecallOthers = recallOthers;
       if (!allowed) this.areaAdminOpen = false;
     }
   }
@@ -1161,6 +1190,7 @@ struct NativeVoice {
     if (channels === undefined) return;
     const selectionChanged = !channels.some((ch: OopzVoiceChannel): boolean => ch.channelId === this.selectedChannelId);
     if (selectionChanged) {
+      this.closeChatAction(false);
       this.selectedChannelId = this.pickDefaultChannel(channels);
       this.chatInput = '';
     }
@@ -2661,12 +2691,22 @@ struct NativeVoice {
         List({ scroller: this.chatScroller, space: 8 }) {
           ForEach(this.chatMessages, (msg: ChatMessageItem) => {
             ListItem() {
-              ChatMessageRow({ item: msg, isDark: this.isDark, oopzEmojiFontReady: this.oopzEmojiFontReady })
+              ChatMessageRow({
+                item: msg, isDark: this.isDark, oopzEmojiFontReady: this.oopzEmojiFontReady, isDesktop: this.isPc,
+                canRecall: msg.messageId.length > 0 && (msg.isSelf || this.canRecallOthers),
+                onRecallMenu: (item: ChatMessageItem, x: number, y: number) => { this.openRecallMenu(item, x, y); },
+                onPreview: (image: OopzChatAttachment) => { this.openChatImage(msg, image); }
+              })
             }
           }, (msg: ChatMessageItem) => `${msg.key}_${this.isDark ? 1 : 0}_${msg.textRuns.length > 0 && this.oopzEmojiFontReady}`)
         }
         .width('100%')
         .layoutWeight(1)
+        .maintainVisibleContentPosition(true)
+        .onScrollIndex((first: number, last: number) => {
+          this.chatFirstVisible = first;
+          this.chatLastVisible = last;
+        })
         .padding({ left: 4, right: 4, top: 4, bottom: 4 })
       }
 
@@ -3136,17 +3176,40 @@ struct NativeVoice {
   }
 
   build() {
-    Column() {
-      if (this.isPc) {
-        this.desktopShell()
-      } else if (this.areaAdminOpen) {
-        this.adminPanel()
-      } else {
-        this.mobileShell()
+    Stack() {
+      Column() {
+        if (this.isPc) {
+          this.desktopShell()
+        } else if (this.areaAdminOpen) {
+          this.adminPanel()
+        } else {
+          this.mobileShell()
+        }
+      }.width('100%').height('100%')
+        .enabled(!this.hasChatAction())
+        .accessibilityLevel(this.hasChatAction() ? 'no-hide-descendants' : 'auto')
+      if (this.previewImage !== undefined) {
+        ChatImagePreview({
+          imageUrl: this.previewImage.url, imageName: this.previewImage.displayName || '图片',
+          isDesktop: this.isPc, onClose: () => { this.closeChatAction(); }
+        })
+      } else if (this.recallItem !== undefined) {
+        ChatRecallOverlay({
+          item: this.recallItem, isDark: this.isDark, isDesktop: this.isPc,
+          windowX: this.menuX, windowY: this.menuY, confirming: this.recallConfirming, busy: this.recallBusy,
+          onDismiss: () => { this.closeChatAction(); },
+          onChooseRecall: () => { this.recallConfirming = true; },
+          onSubmit: () => { this.submitChatRecall(); }
+        })
       }
     }
     .width('100%')
     .height('100%')
+    .onKeyEvent((event: KeyEvent): boolean => {
+      if (event.type !== KeyType.Down || event.keyCode !== KeyCode.KEYCODE_ESCAPE || !this.hasChatAction()) return false;
+      if (!this.recallBusy) this.closeChatAction();
+      return true;
+    })
     .onAreaChange((_oldVal: Area, newVal: Area) => {
       const w = parseFloat(String(newVal.width));
       if (w > 0 && Math.abs(w - this.pageWidth) >= 2) {
