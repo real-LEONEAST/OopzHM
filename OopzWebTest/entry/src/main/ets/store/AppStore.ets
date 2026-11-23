@@ -63,6 +63,7 @@ export class AppStore {
   private readonly latestChannelRead: Map<string, number> = new Map<string, number>();
   readonly membersByChannel: Map<string, OopzChannelMember[]> = new Map<string, OopzChannelMember[]>();
   readonly messagesByChannel: Map<string, OopzChatMessage[]> = new Map<string, OopzChatMessage[]>();
+  private readonly unreadChatByChannel: Map<string, Set<string>> = new Map<string, Set<string>>();
   private readonly recalledIds: Map<string, Set<string>> = new Map<string, Set<string>>();
   private readonly pendingRecalls: Map<string, OopzCred> = new Map<string, OopzCred>();
   readonly personByUid: Map<string, OopzPersonInfo> = new Map<string, OopzPersonInfo>();
@@ -188,6 +189,7 @@ export class AppStore {
     AppStorage.setOrCreate<string>('oopzThemeMode', 'system');
     AppStorage.setOrCreate<VoiceMode>('oopzVoiceMode', 'standard');
     AppStorage.setOrCreate<boolean>('oopzImmersiveLight', true);
+    AppStorage.setOrCreate<boolean>('oopzPeerCue', true);
     if (!AppStorage.has('oopzSystemIsDark')) {
       AppStorage.setOrCreate<boolean>('oopzSystemIsDark', true);
     }
@@ -223,12 +225,14 @@ export class AppStore {
       const trayOnClose = Boolean(await pref.get('trayOnClose', true));
       const immersiveLight = Boolean(await pref.get('immersiveLight', true));
       const micCue = Boolean(await pref.get('micCue', false));
+      const peerCue = Boolean(await pref.get('peerCue', true));
       const voiceMode = String(await pref.get('voiceMode', 'standard'));
       AppStorage.setOrCreate<boolean>('oopzGripEnabled', gripEnabled);
       this.setMicGain(undefined, micGain, false);
       AppStorage.setOrCreate<boolean>('oopzTrayOnClose', trayOnClose);
       AppStorage.setOrCreate<boolean>('oopzImmersiveLight', immersiveLight);
       AppStorage.setOrCreate<boolean>('oopzMicCue', micCue);
+      AppStorage.setOrCreate<boolean>('oopzPeerCue', peerCue);
       AppStorage.setOrCreate<VoiceMode>('oopzVoiceMode', voiceMode === 'native-voip' ? 'native-voip' : 'standard');
       this.applyThemeMode(context, themeMode);
     } catch {
@@ -344,6 +348,11 @@ export class AppStore {
     if (context !== undefined) this.saveUiPrefValue(context, 'micCue', enabled);
   }
 
+  setPeerCue(context: common.UIAbilityContext | undefined, enabled: boolean): void {
+    AppStorage.setOrCreate<boolean>('oopzPeerCue', enabled);
+    if (context !== undefined) this.saveUiPrefValue(context, 'peerCue', enabled);
+  }
+
   private saveUiPrefValue(context: common.UIAbilityContext, key: string, value: preferences.ValueType): Promise<void> {
     return preferences.getPreferences(context, UI_PREF_NAME).then(async (pref) => {
       await pref.put(key, value);
@@ -440,6 +449,7 @@ export class AppStore {
     this.channelGroupsByArea.clear();
     this.membersByChannel.clear();
     this.messagesByChannel.clear();
+    this.unreadChatByChannel.clear();
     this.recalledIds.clear();
     this.pendingRecalls.clear();
     this.personByUid.clear();
@@ -575,6 +585,14 @@ export class AppStore {
     return msg.clientMessageId ? 'client/' + msg.senderUid + '/' + msg.clientMessageId : '';
   }
 
+  unreadChatChannels(): string[] {
+    return Array.from(this.unreadChatByChannel.keys());
+  }
+
+  markChatRead(channelId: string): boolean {
+    return this.unreadChatByChannel.delete(channelId);
+  }
+
   isChatMessageRecalled(channelId: string, messageId: string): boolean {
     return this.recalledIds.get(channelId)?.has(messageId) ?? false;
   }
@@ -636,8 +654,21 @@ export class AppStore {
       await this.ensurePersons([message.senderUid]);
     }
     if (this.session.getCred() !== cred) return;
-    this.appendMessage(message.channelId, message);
-    this.chatListener?.(message.channelId, 'append');
+    const channelId = message.channelId;
+    const clientKey = this.clientMessageKey(message);
+    const unreadKey = message.messageId || clientKey;
+    const existing = this.messagesByChannel.get(channelId) ?? [];
+    const known = existing.some((msg: OopzChatMessage): boolean =>
+      (!!message.messageId && msg.messageId === message.messageId) ||
+      (!!clientKey && this.clientMessageKey(msg) === clientKey));
+    this.appendMessage(channelId, message);
+    if (cred && message.senderUid && message.senderUid !== cred.personUid && unreadKey && !known &&
+      !this.isChatMessageRecalled(channelId, unreadKey) && !this.isChatMessageRecalled(channelId, clientKey)) {
+      const unread = this.unreadChatByChannel.get(channelId) ?? new Set<string>();
+      unread.add(unreadKey);
+      this.unreadChatByChannel.set(channelId, unread);
+    }
+    this.chatListener?.(channelId, 'append');
   }
 
   private handleMessageRecall(_areaId: string, channelId: string, messageId: string): void {
@@ -651,6 +682,13 @@ export class AppStore {
       return;
     }
     this.updateChatCache(channelId, current);
+    const unread = this.unreadChatByChannel.get(channelId);
+    if (unread !== undefined) {
+      for (const key of unread) {
+        if (ids.has(key)) unread.delete(key);
+      }
+      if (unread.size === 0) this.unreadChatByChannel.delete(channelId);
+    }
     this.chatListener?.(channelId, 'recall', messageId);
   }
 
@@ -828,6 +866,7 @@ export class AppStore {
     await this.requireStructurePrivilege(areaId, OopzPrivilege.MANAGE_CHANNEL, '管理频道');
     await this.admin.deleteChannel(areaId, channelId);
     this.messagesByChannel.delete(channelId);
+    this.unreadChatByChannel.delete(channelId);
     this.membersByChannel.delete(channelId);
     await this.refreshAfterStructureChange(areaId, 'channel_delete');
   }

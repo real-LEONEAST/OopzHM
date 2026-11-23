@@ -4,7 +4,7 @@ import { audio } from '@kit.AudioKit';
 import { AVInputCastPicker, AVCastPickerState } from '@kit.AVSessionKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
-import { window } from '@kit.ArkUI';
+import { UIObserver, window } from '@kit.ArkUI';
 import { KeyCode } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { PRODUCT_NAME } from 'BuildProfile';
@@ -341,6 +341,7 @@ struct NativeVoice {
   @State private mediaInputMenuOpen: boolean = false;
   @State private roomMembers: RoomMemberModel[] = [];
   @State private chatMessages: ChatMessageItem[] = [];
+  @State private unreadChatChannelIds: string[] = [];
   @State private chatInput: string = '';
   @State private chatReply?: OopzChatReference = undefined;
   @State private chatImage?: ChatImageDraft = undefined;
@@ -362,6 +363,10 @@ struct NativeVoice {
   private actionArea: string = '';
   private chatInteraction: number = 0;
   @State private chatAtEnd: boolean = true;
+  private followChatEnd: boolean = false;
+  private chatEndLayout: string = '';
+  private chatLayoutObserver?: UIObserver;
+  private readonly onChatDidLayout: () => void = () => { this.alignChatAfterLayout(); };
   private chatLoadVersion: number = 0;
   private chatFirstVisible: number = 0;
   private chatLastVisible: number = 0;
@@ -395,6 +400,7 @@ struct NativeVoice {
   @StorageProp('oopzSelfAvatar') private selfAvatar: string = '';
   @StorageProp('oopzCallChannelName') private activeCallName: string = '';
   @StorageProp('oopzMicCue') private micCue: boolean = false;
+  @StorageProp('oopzPeerCue') private peerCue: boolean = true;
 
   private readonly store: AppStore = AppStore.get();
   private readonly chatScroller: Scroller = new Scroller();
@@ -468,7 +474,9 @@ struct NativeVoice {
         this.syncViewModels();
       }
     });
+    this.syncUnreadChatChannels();
     this.store.setChatListener((channelId: string, change: string, messageId?: string) => {
+      this.syncUnreadChatChannels();
       if (channelId === this.selectedChannelId) {
         if (change === 'recall' && this.chatReply && this.chatReply.messageId === messageId) {
           this.chatReply = {
@@ -480,7 +488,7 @@ struct NativeVoice {
           if (change === 'recall' && messageId === this.actionMessageId) this.closeChatAction();
           return;
         }
-        this.syncChatMessages(change === 'append' && this.chatAtEnd);
+        this.syncChatMessages();
       }
     });
     this.store.setAreaAdminListener((areaId: string, reason: string) => {
@@ -513,6 +521,7 @@ struct NativeVoice {
 
   aboutToDisappear(): void {
     this.closeChatAction(false);
+    this.detachChatLayoutObserver();
     this.resetChatAttachments();
     this.restoreDesktopCaption();
     this.activePage = false;
@@ -620,6 +629,7 @@ struct NativeVoice {
       this.lastStatsAt = 0;
       hilog.info(0x0, TAG, 'Native app foreground after %{public}d seconds, state=%{public}d', seconds, this.state);
       this.resumeCallAudio();
+      this.alignChatAfterLayout();
     }
   }
 
@@ -1168,30 +1178,77 @@ struct NativeVoice {
         reference: referenceId ? this.chatReferenceView(referenceId, source) : undefined
       });
     }
+    if (scrollToBottom) {
+      this.followChatEnd = true;
+      this.chatEndLayout = '';
+    }
     this.chatMessages = items;
     if (items.some((item: ChatMessageItem) => item.textRuns.length > 0)) this.loadOopzEmojiFont();
-    if (scrollToBottom && items.length > 0) {
-      const interaction = this.chatInteraction;
-      setTimeout(() => {
-        if (interaction !== this.chatInteraction || this.selectedChannelId !== chId || !this.activePage) return;
-        try {
-          this.chatScroller.scrollEdge(Edge.Bottom);
-        } catch {
-          // ignore if not attached yet
-        }
-      }, 60);
+  }
+
+  private syncUnreadChatChannels(): void {
+    const unread = this.store.unreadChatChannels();
+    if (unread.length !== this.unreadChatChannelIds.length ||
+      unread.some((id: string, index: number): boolean => id !== this.unreadChatChannelIds[index])) {
+      this.unreadChatChannelIds = unread;
+    }
+  }
+
+  private hasUnreadChat(channel: ChannelCard): boolean {
+    return channel.isText && this.unreadChatChannelIds.includes(channel.channelId);
+  }
+
+  private attachChatLayoutObserver(): void {
+    if (this.chatLayoutObserver !== undefined) return;
+    const observer = this.getUIContext().getUIObserver();
+    this.chatLayoutObserver = observer;
+    observer.on('didLayout', this.onChatDidLayout);
+    this.alignChatAfterLayout();
+  }
+
+  private detachChatLayoutObserver(): void {
+    this.chatLayoutObserver?.off('didLayout', this.onChatDidLayout);
+    this.chatLayoutObserver = undefined;
+    this.chatEndLayout = '';
+  }
+
+  private alignChatAfterLayout(): void {
+    if (!this.activePage || !this.chatLayoutObserver || this.hasChatAction() || this.areaAdminOpen ||
+      this.selectedChannelObj?.type !== 'TEXT' || this.chatMessages.length === 0) return;
+    if (this.isPc && this.desktopPane !== 'room') return;
+    if (this.mobilePane !== 'room' && !(this.isPc && this.isWide())) return;
+    const lastIndex = this.chatMessages.length - 1;
+    const lastRect = this.chatScroller.getItemRect(lastIndex);
+    const firstRect = this.chatScroller.getItemRect(this.chatFirstVisible);
+    if (lastRect.height <= 0 && firstRect.height <= 0) return;
+    this.updateChatEnd();
+    if (this.chatAtEnd) {
+      if (this.foreground && lastRect.height > 0 && this.store.markChatRead(this.selectedChannelId)) {
+        this.syncUnreadChatChannels();
+      }
+    } else if (this.followChatEnd) {
+      // A later image decode can change the layout again. Skip repeated attempts on the same geometry.
+      const layout = `${this.chatMessages[lastIndex].key}/${this.chatFirstVisible}/${this.chatLastVisible}/` +
+        `${firstRect.y}/${firstRect.height}/${lastRect.y}/${lastRect.height}`;
+      if (layout !== this.chatEndLayout) {
+        this.chatEndLayout = layout;
+        this.chatScroller.scrollToIndex(lastIndex, false, ScrollAlign.END);
+      }
     }
   }
 
   private updateChatEnd(): void {
-    this.chatAtEnd = this.chatMessages.length === 0 || this.chatScroller.isAtEnd();
+    this.chatAtEnd = this.chatMessages.length === 0 ||
+      (this.chatLastVisible >= this.chatMessages.length - 1 && this.chatScroller.isAtEnd());
+    if (this.chatAtEnd) this.chatEndLayout = '';
   }
 
   private jumpToChatEnd(): void {
     if (!this.chatMessages.length || this.hasChatAction()) return;
     this.chatInteraction++;
-    this.chatScroller.scrollEdge(Edge.Bottom);
-    this.updateChatEnd();
+    this.followChatEnd = true;
+    this.chatEndLayout = '';
+    this.alignChatAfterLayout();
   }
 
   private hasChatAction(): boolean {
@@ -1200,6 +1257,7 @@ struct NativeVoice {
 
   private beginChatAction(msg: ChatMessageItem): void {
     this.chatInteraction++;
+    this.followChatEnd = false;
     this.actionArea = this.selectedAreaId;
     this.actionChannel = this.selectedChannelId;
     this.actionMessageId = msg.messageId;
@@ -1266,18 +1324,25 @@ struct NativeVoice {
     // if a visible row was recalled while a newer page of history arrived).
     setTimeout(() => {
       if (interaction !== this.chatInteraction || channelId !== this.selectedChannelId || !this.activePage) return;
+      let adjusted = false;
       const anchor = saved.find((a: ChatAnchor): boolean => this.chatMessages.some((m: ChatMessageItem): boolean =>
         m.key === a.key));
       if (anchor !== undefined) {
         const index = this.chatMessages.findIndex((m: ChatMessageItem): boolean => m.key === anchor.key);
         const rect = this.chatScroller.getItemRect(index);
         if (rect.height > 0) {
-          if (Math.abs(rect.y - anchor.y) > 0.5) this.chatScroller.scrollBy(0, rect.y - anchor.y);
+          if (Math.abs(rect.y - anchor.y) > 0.5) {
+            this.chatScroller.scrollBy(0, rect.y - anchor.y);
+            adjusted = true;
+          }
         } else {
           this.chatScroller.scrollToIndex(index, false, ScrollAlign.START);
           this.chatScroller.scrollBy(0, -anchor.y);
+          adjusted = true;
         }
       }
+      this.updateChatEnd();
+      if (!adjusted && this.chatAtEnd) this.followChatEnd = true;
       if (this.isPc) {
         if (focusComposer) {
           focusControl.requestFocus('chat-composer-input');
@@ -1379,6 +1444,8 @@ struct NativeVoice {
       this.chatLoadVersion++;
       this.loadingChat = false;
       this.chatAtEnd = true;
+      this.followChatEnd = false;
+      this.chatEndLayout = '';
       this.chatFirstVisible = 0;
       this.chatLastVisible = 0;
       this.chatMessages = [];
@@ -1944,7 +2011,7 @@ struct NativeVoice {
   }
 
   private playPeerCue(joined: boolean): void {
-    if (!this.speakerMuted && this.state === CallState.CONNECTED && Date.now() >= this.peerCuesAfter) {
+    if (this.peerCue && !this.speakerMuted && this.state === CallState.CONNECTED && Date.now() >= this.peerCuesAfter) {
       this.rtc?.playRoomCue(joined);
     }
   }
@@ -2227,6 +2294,9 @@ struct NativeVoice {
         if (ch.inCall) {
           SymbolGlyph($r('sys.symbol.waveform')).fontSize(14).fontColor([getTheme(this.isDark).speaking])
         }
+        if (this.hasUnreadChat(ch)) {
+          Circle().width(8).height(8).fill(getTheme(this.isDark).dangerFill)
+        }
         if (ch.onlineCount > 0) {
           Text(String(ch.onlineCount)).fontSize(11).fontColor(getTheme(this.isDark).textSecondary)
         }
@@ -2239,7 +2309,8 @@ struct NativeVoice {
     .padding(0)
     .borderRadius(7)
     .backgroundColor(ch.isSelected ? getTheme(this.isDark).accentSoft : Color.Transparent)
-    .accessibilityText(`${ch.name}${ch.inCall ? '，通话中' : ''}${ch.isSelected ? '，正在浏览' : ''}`)
+    .accessibilityText(`${ch.name}${ch.inCall ? '，通话中' : ''}${ch.isSelected ? '，正在浏览' : ''}` +
+      (this.hasUnreadChat(ch) ? '，有未读消息' : ''))
     .hoverEffect(HoverEffect.Highlight)
     .onClick(() => { this.desktopPane = 'room'; this.selectChannel(ch.channelId); })
   }
@@ -2741,6 +2812,8 @@ struct NativeVoice {
             Text(channel.maxMember > 0 ? channel.onlineCount + '/' + channel.maxMember : String(channel.onlineCount))
               .fontSize(11)
               .fontColor(getTheme(this.isDark).textMuted)
+          } else if (this.hasUnreadChat(channel)) {
+            Circle().width(8).height(8).fill(getTheme(this.isDark).dangerFill)
           }
         }
         .width('100%')
@@ -2750,7 +2823,7 @@ struct NativeVoice {
       .padding({ left: 8, right: 6 })
       .borderRadius(AppSpacing.radiusSm)
       .backgroundColor(Color.Transparent)
-      .accessibilityText(channel.name)
+      .accessibilityText(channel.name + (this.hasUnreadChat(channel) ? '，有未读消息' : ''))
       .onClick(() => { this.selectChannel(channel.channelId); })
       if (!channel.isText && channel.members.length > 0) {
         Button({ type: ButtonType.Normal }) {
@@ -2915,7 +2988,11 @@ struct NativeVoice {
         .justifyContent(FlexAlign.Center)
       } else {
         Stack({ alignContent: Alignment.BottomEnd }) {
-          List({ scroller: this.chatScroller, space: 8 }) {
+          List({
+            scroller: this.chatScroller,
+            space: 8,
+            initialIndex: this.followChatEnd ? this.chatMessages.length - 1 : 0
+          }) {
             ForEach(this.chatMessages, (msg: ChatMessageItem) => {
               ListItem() {
                 ChatMessageRow({
@@ -2932,6 +3009,8 @@ struct NativeVoice {
           .width('100%')
           .height('100%')
           .maintainVisibleContentPosition(true)
+          .onAppear(() => { this.attachChatLayoutObserver(); })
+          .onDisAppear(() => { this.detachChatLayoutObserver(); })
           .onScrollIndex((first: number, last: number) => {
             this.chatFirstVisible = first;
             this.chatLastVisible = last;
@@ -2940,9 +3019,15 @@ struct NativeVoice {
           .onWillScroll((offset: number, _state: ScrollState, source: ScrollSource) => {
             if (offset !== 0 && !this.hasChatAction() && (source === ScrollSource.DRAG ||
               source === ScrollSource.OTHER_USER_INPUT || source === ScrollSource.SCROLL_BAR ||
-              source === ScrollSource.FLING || source === ScrollSource.SCROLL_BAR_FLING)) this.chatInteraction++;
+              source === ScrollSource.FLING || source === ScrollSource.SCROLL_BAR_FLING)) {
+              this.chatInteraction++;
+              this.followChatEnd = false;
+            }
           })
-          .onDidScroll(() => { this.updateChatEnd(); })
+          .onDidScroll((offset: number) => {
+            this.updateChatEnd();
+            if (offset !== 0 && this.chatAtEnd && !this.hasChatAction()) this.followChatEnd = true;
+          })
           .onAreaChange(() => { this.updateChatEnd(); })
           .padding(4)
           if (!this.chatAtEnd) {
