@@ -801,7 +801,7 @@ export class OopzSession {
     if (profile.uid.length === 0) {
       profile.uid = cred.personUid;
     }
-    if (profile.pid > 0) {
+    if (this.cred === cred && profile.pid > 0) {
       this.cachedPid = String(profile.pid);
     }
     return profile;

@@ -220,6 +220,7 @@ export class AppStore {
     try {
       const pref = await preferences.getPreferences(context, UI_PREF_NAME);
       const themeMode = String(await pref.get('themeMode', 'system'));
+      this.applyThemeMode(context, themeMode);
       const gripEnabled = Boolean(await pref.get('gripEnabled', true));
       const micGain = Number(await pref.get('micGain', DEFAULT_MIC_GAIN));
       const trayOnClose = Boolean(await pref.get('trayOnClose', true));
@@ -234,7 +235,6 @@ export class AppStore {
       AppStorage.setOrCreate<boolean>('oopzMicCue', micCue);
       AppStorage.setOrCreate<boolean>('oopzPeerCue', peerCue);
       AppStorage.setOrCreate<VoiceMode>('oopzVoiceMode', voiceMode === 'native-voip' ? 'native-voip' : 'standard');
-      this.applyThemeMode(context, themeMode);
     } catch {
       hilog.warn(0x0, TAG, 'loadUiPrefs failed');
     }
@@ -479,11 +479,11 @@ export class AppStore {
   }
 
   async loadSelfProfile(): Promise<OopzPersonInfo | undefined> {
-    if (!this.session.isSignedIn()) {
-      return undefined;
-    }
+    const cred = this.session.getCred();
+    if (cred === undefined) return undefined;
     try {
       const profile = await this.session.selfProfile();
+      if (this.session.getCred() !== cred) return undefined;
       this.selfProfile = profile;
       this.cachePerson(profile);
       AppStorage.setOrCreate<string>('oopzSelfName', profile.name);
@@ -498,8 +498,10 @@ export class AppStore {
   }
 
   async loadAreas(): Promise<OopzArea[]> {
-    this.areas = await this.session.areas();
     const cred = this.session.getCred();
+    const areas = await this.session.areas();
+    if (this.session.getCred() !== cred) return [];
+    this.areas = areas;
     if (cred !== undefined) {
       const areaIds = this.areas.map((a: OopzArea): string => a.areaId);
       this.ws.start(cred, areaIds);

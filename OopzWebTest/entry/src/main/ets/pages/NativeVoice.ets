@@ -29,6 +29,8 @@ import {
 } from '../components/ChatMessageRow';
 import { ChatImageDraft, discardChatImage, pickChatImage } from '../components/ChatImagePicker';
 import { ChatImagePreview } from '../components/ChatImagePreview';
+import { LoginForm } from '../components/LoginForm';
+import { StartupCover } from '../components/StartupCover';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
 import { VoiceOutputPicker } from '../components/VoiceDevices';
 import { AppSpacing, getTheme, nativePopupMaterial } from '../common/Theme';
@@ -318,6 +320,9 @@ struct MemberRow {
 @Entry
 @Component
 struct NativeVoice {
+  @State private checkingSession: boolean = true;
+  @State private showLogin: boolean = false;
+  private startupCoverEnabled: boolean = false;
   @State private pageWidth: number = 390;
   @State private mobilePane: MobilePane = 'channels';
   @State private desktopPane: 'room' | 'account' | 'settings' = 'room';
@@ -464,6 +469,8 @@ struct NativeVoice {
 
   aboutToAppear(): void {
     this.activePage = true;
+    this.startupCoverEnabled = AppStorage.get<boolean>('oopzStartupCoverPending') === true;
+    if (this.startupCoverEnabled) AppStorage.setOrCreate<boolean>('oopzStartupCoverPending', false);
     const context = this.getAbilityContext();
     if (context !== undefined) {
       this.store.bind(context);
@@ -554,7 +561,7 @@ struct NativeVoice {
   }
 
   onPageShow(): void {
-    this.attachDesktopCaption();
+    if (!this.checkingSession && !this.showLogin) this.attachDesktopCaption();
     if (AppStorage.get<boolean>('oopzRequestReturnRoom') === true) {
       AppStorage.setOrCreate<boolean>('oopzRequestReturnRoom', false);
       this.jumpToActiveRoom();
@@ -778,19 +785,33 @@ struct NativeVoice {
   }
 
   private async bootstrap(): Promise<void> {
-    await this.restoreSession();
-    const selfTest = AppStorage.get<boolean>('oopzNativeSelfTest') === true;
-    const hasAutoCred = (AppStorage.get<string>('oopzAutoJwt') ?? '').length > 0 ||
-      ((AppStorage.get<string>('oopzAutoPhone') ?? '').length > 0 &&
-        (AppStorage.get<string>('oopzAutoPass') ?? '').length > 0);
-    if (!this.signedIn && !selfTest && !hasAutoCred) {
-      this.getUIContext().getRouter().replaceUrl({ url: 'pages/Login' }).catch(() => {});
-      return;
+    try {
+      await this.restoreSession();
+      if (!this.activePage) return;
+      const selfTest = AppStorage.get<boolean>('oopzNativeSelfTest') === true;
+      const hasAutoCred = (AppStorage.get<string>('oopzAutoJwt') ?? '').length > 0 ||
+        ((AppStorage.get<string>('oopzAutoPhone') ?? '').length > 0 &&
+          (AppStorage.get<string>('oopzAutoPass') ?? '').length > 0);
+      if (!this.signedIn && !selfTest && !hasAutoCred) {
+        this.showLogin = true;
+        return;
+      }
+      await this.applyLaunch();
+      if (selfTest && this.activePage) this.runSelfTest();
+    } catch (error) {
+      if (this.activePage) this.notice = (error as Error).message;
+    } finally {
+      if (this.activePage) this.checkingSession = false;
     }
-    await this.applyLaunch();
-    if (selfTest) {
-      this.runSelfTest();
-    }
+  }
+
+  private openSignedIn(): void {
+    if (!this.activePage) return;
+    this.signedIn = true;
+    this.showLogin = false;
+    this.applyLaunch().catch((error: Error) => {
+      if (this.activePage) this.notice = error.message;
+    });
   }
 
   private async loadRtc(): Promise<void> {
@@ -808,48 +829,40 @@ struct NativeVoice {
   }
 
   private async restoreSession(): Promise<void> {
-    const context = this.getAbilityContext();
-    if (context === undefined) return;
-    this.store.bind(context);
     try {
-      const cred = await this.store.restore();
-      if (cred === undefined) return;
+      const cred = this.store.session.getCred() ?? await this.store.restore();
+      if (cred === undefined || !this.activePage) return;
       this.signedIn = true;
       hilog.info(0x0, TAG, 'Restored Oopz session');
-      await this.store.loadSelfProfile();
-      await this.loadAreas();
     } catch {
       hilog.warn(0x0, TAG, 'Unable to restore Oopz session');
     }
   }
 
   private async applyLaunch(): Promise<void> {
-    if (this.signedIn) {
-      await this.autoPickAndJoin();
-      return;
-    }
-    const jwt = AppStorage.get<string>('oopzAutoJwt');
-    if (jwt !== undefined && jwt.length > 0) {
-      const person = AppStorage.get<string>('oopzAutoPerson') ?? '';
-      const device = AppStorage.get<string>('oopzAutoDevice') ?? '';
-      const deviceId = device.length > 0 ? device : util.generateRandomUUID(true);
-      await this.store.seedAndSaveCred(deviceId, person, jwt);
+    if (!this.signedIn) {
+      const jwt = AppStorage.get<string>('oopzAutoJwt') ?? '';
+      if (jwt.length > 0) {
+        const person = AppStorage.get<string>('oopzAutoPerson') ?? '';
+        const device = AppStorage.get<string>('oopzAutoDevice') ?? '';
+        const deviceId = device.length > 0 ? device : util.generateRandomUUID(true);
+        await this.store.seedAndSaveCred(deviceId, person, jwt);
+      } else {
+        const phone = AppStorage.get<string>('oopzAutoPhone') ?? '';
+        const pass = AppStorage.get<string>('oopzAutoPass') ?? '';
+        if (phone.length === 0 || pass.length === 0) return;
+        const deviceId = await this.store.loadDeviceId();
+        await this.store.login(phone, pass, deviceId);
+      }
+      if (!this.activePage) return;
       this.signedIn = true;
-      await this.store.loadSelfProfile();
-      await this.loadAreas();
-      await this.autoPickAndJoin();
-      return;
     }
-    const phone = AppStorage.get<string>('oopzAutoPhone') ?? '';
-    const pass = AppStorage.get<string>('oopzAutoPass') ?? '';
-    if (phone.length > 0 && pass.length > 0) {
-      const deviceId = await this.store.loadDeviceId();
-      await this.store.login(phone, pass, deviceId);
-      this.signedIn = true;
-      await this.store.loadSelfProfile();
-      await this.loadAreas();
-      await this.autoPickAndJoin();
-    }
+    this.checkingSession = false;
+    const cred = this.store.session.getCred();
+    const profile = this.store.selfProfile === undefined ? this.store.loadSelfProfile() : Promise.resolve();
+    await this.loadAreas();
+    await profile;
+    if (this.activePage && this.store.session.getCred() === cred) await this.autoPickAndJoin();
   }
 
   private async autoPickAndJoin(): Promise<void> {
@@ -896,9 +909,11 @@ struct NativeVoice {
 
   private async loadAreas(): Promise<void> {
     if (this.readingRooms || !this.signedIn) return;
+    const cred = this.store.session.getCred();
     this.readingRooms = true;
     try {
       const areas = await this.store.loadAreas();
+      if (!this.activePage || this.store.session.getCred() !== cred) return;
       this.areas = areas;
       hilog.info(0x0, TAG, 'Oopz areas count=%{public}d', areas.length);
       if (areas.length === 0) {
@@ -2384,6 +2399,19 @@ struct NativeVoice {
   }
 
   @Builder
+  private loadingChannels() {
+    Row({ space: 8 }) {
+      LoadingProgress()
+        .width(16)
+        .height(16)
+        .color(getTheme(this.isDark).accent)
+        .accessibilityLevel('no')
+      Text('正在加载频道…').fontSize(13).fontColor(getTheme(this.isDark).textMuted)
+    }
+    .padding(8)
+  }
+
+  @Builder
   private desktopChannelPane() {
     Column({ space: 8 }) {
       Row({ space: 4 }) {
@@ -2391,8 +2419,10 @@ struct NativeVoice {
           .alignItems(HorizontalAlign.Start).layoutWeight(1)
         if (this.canManageArea) { this.adminEntry() }
       }.width('100%')
-      if (this.channelCards.length === 0) {
-        Text(this.readingRooms ? '正在读取频道…' : '暂无可浏览的频道')
+      if (this.channelCards.length === 0 && this.readingRooms) {
+        this.loadingChannels()
+      } else if (this.channelCards.length === 0) {
+        Text(this.notice || '暂无可浏览的频道')
           .fontSize(12)
           .fontColor(getTheme(this.isDark).textMuted)
           .padding(5)
@@ -2894,8 +2924,10 @@ struct NativeVoice {
             this.mobileChannelRow(item.channel)
           }
         }, (item: ChannelListItem) => item.key)
-        if (this.channelCards.length === 0) {
-          Text(this.readingRooms ? '正在加载频道…' : (this.notice || '暂无频道'))
+        if (this.channelCards.length === 0 && this.readingRooms) {
+          this.loadingChannels()
+        } else if (this.channelCards.length === 0) {
+          Text(this.notice || '暂无频道')
             .fontSize(13)
             .fontColor(getTheme(this.isDark).textMuted)
             .padding(10)
@@ -3464,6 +3496,7 @@ struct NativeVoice {
     .width('100%')
     .height('100%')
     .backgroundColor(getTheme(this.isDark).bg)
+    .onAppear(() => { this.attachDesktopCaption(); })
   }
 
   @Builder
@@ -3546,12 +3579,16 @@ struct NativeVoice {
   build() {
     Stack() {
       Column() {
-        if (this.isPc) {
-          this.desktopShell()
-        } else if (this.areaAdminOpen) {
-          this.adminPanel()
-        } else {
-          this.mobileShell()
+        if (!this.checkingSession) {
+          if (this.showLogin) {
+            LoginForm({ onSignedIn: () => { this.openSignedIn(); } })
+          } else if (this.isPc) {
+            this.desktopShell()
+          } else if (this.areaAdminOpen) {
+            this.adminPanel()
+          } else {
+            this.mobileShell()
+          }
         }
       }.width('100%').height('100%')
         .enabled(!this.hasChatAction())
@@ -3572,9 +3609,13 @@ struct NativeVoice {
           onSubmit: () => { this.submitChatRecall(); }
         })
       }
+      if (this.startupCoverEnabled) {
+        StartupCover({ ready: !this.checkingSession })
+      }
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(getTheme(this.isDark).bg)
     .onKeyEvent((event: KeyEvent): boolean => {
       if (event.type !== KeyType.Down || event.keyCode !== KeyCode.KEYCODE_ESCAPE || !this.hasChatAction()) return false;
       if (!this.recallBusy) this.closeChatAction();
