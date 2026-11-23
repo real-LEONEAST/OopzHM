@@ -28,6 +28,7 @@ export struct AccountPanel {
   @StorageProp('oopzSelfGreeting') private selfGreeting: string = '';
   @StorageProp('oopzWsConnected') private wsConnected: boolean = false;
   @StorageProp('oopzMicCue') private micCue: boolean = false;
+  @StorageProp('oopzPeerCue') private peerCue: boolean = true;
   @StorageProp('oopzInCall') private inCall: boolean = false;
   @StorageProp('oopzCallAreaName') private callAreaName: string = '';
   @StorageProp('oopzCallChannelName') private callChannelName: string = '';
@@ -240,6 +241,15 @@ export struct AccountPanel {
           .accessibilityText('开关麦克风提示音')
           .selectedColor(getTheme(this.isDark).accent)
           .onChange((enabled: boolean) => { this.store.setMicCue(this.context(), enabled); })
+      }
+      .width('100%')
+
+      Row({ space: 12 }) {
+        Text('成员进出提示音').layoutWeight(1).fontSize(14).fontColor(getTheme(this.isDark).text)
+        Toggle({ type: ToggleType.Switch, isOn: this.peerCue })
+          .accessibilityText('成员进出提示音')
+          .selectedColor(getTheme(this.isDark).accent)
+          .onChange((enabled: boolean) => { this.store.setPeerCue(this.context(), enabled); })
       }
       .width('100%')
 
