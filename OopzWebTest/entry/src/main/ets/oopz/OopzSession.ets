@@ -13,6 +13,10 @@ import { extractAppId } from './OopzToken';
 import { normalizeChatText } from './OopzChatText';
 
 const LOGIN_PATH: string = '/client/v1/login/v2/login';
+const CHAT_IMAGE_UPLOAD_PATH: string = '/cos/v1/signedUploadUrl';
+const OOPZ_LEGACY_GATEWAY: string = 'https://gateway.oopz.cn';
+// Published by Oopz at https://staticcdn.oopz.cn/config/eo_gateways_web.json.
+const OOPZ_WEB_GATEWAY: string = 'https://gateway-n.oopz.cn';
 const TAG: string = 'OopzNative';
 const USER_AGENT: string =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
@@ -345,6 +349,15 @@ interface ChatImageUploadEnvelope extends ChatImageUploadTicket {
   data?: ChatImageUploadTicket;
 }
 
+class OopzHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, detail: string) {
+    super('Oopz 请求失败：' + detail);
+    this.status = status;
+  }
+}
+
 interface SendMessagePayload {
   area: string;
   channel: string;
@@ -569,11 +582,11 @@ export class OopzSession {
     return headers;
   }
 
-  private async send(path: string, method: string, body?: string): Promise<HttpResult> {
+  private async send(path: string, method: string, body?: string, gateway: string = OOPZ_API_BASE): Promise<HttpResult> {
     const cred = this.requireCred();
     const header = await this.makeApiHeaders(cred.deviceId, cred.personUid, cred.jwtToken, path,
       body === undefined ? '' : body);
-    return await httpSend(method, OOPZ_API_BASE + path, header, body);
+    return await httpSend(method, gateway + path, header, body);
   }
 
   async signedSend(path: string, method: string, body?: string): Promise<HttpResult> {
@@ -615,8 +628,9 @@ export class OopzSession {
     }
   }
 
-  private async requestJson(path: string, method: string, body?: string): Promise<Object> {
-    const result = await this.send(path, method, body);
+  private async requestJson(path: string, method: string, body?: string,
+    gateway: string = OOPZ_API_BASE): Promise<Object> {
+    const result = await this.send(path, method, body, gateway);
     hilog.info(0x0, TAG, 'api %{public}s %{public}s -> %{public}d', method, path, result.status);
     let parsed: Object | undefined = undefined;
     if (result.text.length > 0) {
@@ -635,7 +649,7 @@ export class OopzSession {
           detail = msg;
         }
       }
-      throw new Error('Oopz 请求失败：' + detail);
+      throw new OopzHttpError(result.status, detail);
     }
     if (parsed === undefined) {
       throw new Error('Oopz 返回了无效数据');
@@ -949,16 +963,35 @@ export class OopzSession {
     return out;
   }
 
+  private async requestChatImageUpload(cred: OopzCred): Promise<ChatImageUploadTicket> {
+    const body = JSON.stringify({ type: 'IMAGE', ext: '.webp' });
+    let result: Object;
+    try {
+      try {
+        result = await this.requestJson(CHAT_IMAGE_UPLOAD_PATH, 'PUT', body);
+      } catch (error) {
+        // The legacy gateway can return 404 for a media route available on the current Web gateway.
+        if (OOPZ_API_BASE !== OOPZ_LEGACY_GATEWAY || !(error instanceof OopzHttpError) || error.status !== 404) {
+          throw error as Error;
+        }
+        if (this.getCred() !== cred) throw new Error('Oopz 会话已切换');
+        result = await this.requestJson(CHAT_IMAGE_UPLOAD_PATH, 'PUT', body, OOPZ_WEB_GATEWAY);
+      }
+    } catch (error) {
+      throw new Error('申请图片上传地址失败：' + (error as Error).message);
+    }
+    const envelope = result as ChatImageUploadEnvelope;
+    return envelope.data ?? envelope;
+  }
+
   async uploadChatImage(image: OopzChatImage): Promise<OopzUploadedChatImage> {
     const cred = this.requireCred();
     const fileSize = image.bytes.byteLength;
     if (fileSize === 0 || fileSize > MAX_CHAT_IMAGE_BYTES || image.width <= 0 || image.height <= 0) {
       throw new Error('图片文件大小或尺寸无效');
     }
-    const raw = await this.requestJson('/cos/v1/signedUploadUrl', 'PUT',
-      JSON.stringify({ type: 'IMAGE', ext: '.webp' })) as ChatImageUploadEnvelope;
+    const ticket = await this.requestChatImageUpload(cred);
     if (this.getCred() !== cred) throw new Error('Oopz 会话已切换');
-    const ticket = raw.data ?? raw;
     const uploadUrl = asString(ticket.signedUrl);
     const downloadUrl = asString(ticket.url);
     const fileKey = asString(ticket.file);
@@ -1020,7 +1053,17 @@ export class OopzSession {
         attachments: image ? [image] : []
       }
     };
-    const raw = await this.requestJson('/im/session/v2/sendGimMessage', 'POST', JSON.stringify(body));
+    let path = '/im/session/v2/sendGimMessage';
+    if (image) {
+      path += '?a=' + encodeURIComponent(areaId) + '&c=' + encodeURIComponent(channelId);
+    }
+    let raw: Object;
+    try {
+      raw = await this.requestJson(path, 'POST', JSON.stringify(body));
+    } catch (error) {
+      if (image) throw new Error('提交图片消息失败：' + (error as Error).message);
+      throw error as Error;
+    }
     const env = raw as SendMessageEnvelope;
     const data: SendMessageData = env.data !== undefined ? env.data : {
       messageId: env.messageId,

@@ -2978,11 +2978,18 @@ struct NativeVoice {
       }
 
       Row({ space: 8 }) {
-        Button(this.pickingChatImage ? '…' : '图片')
-          .width(46).height(42).padding(0).borderRadius(12).fontSize(13)
-          .fontColor(getTheme(this.isDark).text).backgroundColor(getTheme(this.isDark).surfaceAlt)
-          .accessibilityText('选择图片').enabled(!this.sendingChat && !this.pickingChatImage)
-          .onClick(() => { this.chooseChatImage(); })
+        Button({ type: ButtonType.Normal }) {
+          if (this.pickingChatImage) {
+            LoadingProgress().width(20).height(20).color(getTheme(this.isDark).accent)
+          } else {
+            SymbolGlyph($r('sys.symbol.picture')).fontSize(21).fontColor([getTheme(this.isDark).text])
+          }
+        }
+        .width(46).height(42).padding(0).borderRadius(12)
+        .backgroundColor(getTheme(this.isDark).surfaceAlt)
+        .accessibilityText(this.pickingChatImage ? '正在选择图片' : '选择图片')
+        .enabled(!this.sendingChat && !this.pickingChatImage)
+        .onClick(() => { this.chooseChatImage(); })
 
         TextInput({
           placeholder: `发消息到 #${this.selectedChannelObj?.name ?? '频道'}`,
@@ -3013,16 +3020,20 @@ struct NativeVoice {
           }
         })
 
-        Button(this.sendingChat ? '发送中' : '发送')
-          .height(42)
-          .padding({ left: 16, right: 16 })
-          .borderRadius(14)
-          .backgroundColor(getTheme(this.isDark).accent)
-          .fontColor(getTheme(this.isDark).accentText)
-          .fontWeight(FontWeight.Medium)
-          .enabled(!this.sendingChat && !this.pickingChatImage &&
-            (this.chatInput.trim().length > 0 || this.chatImage !== undefined))
-          .onClick(() => { this.sendChatMessage(); })
+        Button({ type: ButtonType.Normal }) {
+          if (this.sendingChat) {
+            LoadingProgress().width(20).height(20).color(getTheme(this.isDark).accentText)
+          } else {
+            SymbolGlyph($r('sys.symbol.paperplane_fill')).fontSize(21)
+              .fontColor([getTheme(this.isDark).accentText])
+          }
+        }
+        .width(60).height(42).padding(0).borderRadius(14)
+        .backgroundColor(getTheme(this.isDark).accent)
+        .accessibilityText(this.sendingChat ? '正在发送' : '发送消息')
+        .enabled(!this.sendingChat && !this.pickingChatImage &&
+          (this.chatInput.trim().length > 0 || this.chatImage !== undefined))
+        .onClick(() => { this.sendChatMessage(); })
       }
       .width('100%')
       .padding(8)
