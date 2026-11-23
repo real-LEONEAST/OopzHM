@@ -2,6 +2,7 @@
 /.worktrees/
 /.build-cache/
 /.hvigor/
+**/.cxx/
 /work/
 
 # 已下载的对照安装包和鸿蒙打包产物

@@ -7,6 +7,7 @@ import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { motion } from '@kit.MultimodalAwarenessKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { resolveIsDark } from '../common/Theme';
+import type { VoiceMode } from '../common/VoiceMode';
 import { OopzSession } from '../oopz/OopzSession';
 import { OopzCredStore } from '../oopz/OopzCredStore';
 import {
@@ -72,7 +73,8 @@ export class AppStore {
   private chatListener?: ChatListener;
   private areaAdminListener?: AreaAdminListener;
   private themeListener?: (isDark: boolean) => void;
-  private prefsLoaded: boolean = false;
+  private uiPrefs?: Promise<void>;
+  private voiceModeSave: Promise<void> = Promise.resolve();
   private foreground: boolean = false;
   private observingGrip: boolean = false;
   private gripUnavailable: boolean = false;
@@ -171,6 +173,9 @@ export class AppStore {
     AppStorage.setOrCreate<string>('oopzCallInput', '');
     AppStorage.setOrCreate<string>('oopzCallOutput', '');
     AppStorage.setOrCreate<string>('oopzCallVolumeType', '');
+    AppStorage.setOrCreate<VoiceMode | ''>('oopzActiveVoiceMode', '');
+    AppStorage.setOrCreate<string>('oopzCallProcessing', '');
+    AppStorage.setOrCreate<string>('oopzCallAecSupport', '');
     AppStorage.setOrCreate<number>('oopzCallPeers', 0);
     AppStorage.setOrCreate<string>('oopzTaskStatus', '');
     AppStorage.setOrCreate<string>('oopzSdkVersion', '');
@@ -181,6 +186,7 @@ export class AppStore {
     AppStorage.setOrCreate<boolean>('oopzAppForeground', false);
     AppStorage.setOrCreate<boolean>('oopzRequestReturnRoom', false);
     AppStorage.setOrCreate<string>('oopzThemeMode', 'system');
+    AppStorage.setOrCreate<VoiceMode>('oopzVoiceMode', 'standard');
     AppStorage.setOrCreate<boolean>('oopzImmersiveLight', true);
     if (!AppStorage.has('oopzSystemIsDark')) {
       AppStorage.setOrCreate<boolean>('oopzSystemIsDark', true);
@@ -201,11 +207,14 @@ export class AppStore {
     }
   }
 
-  async loadUiPrefs(context: common.UIAbilityContext): Promise<void> {
-    if (this.prefsLoaded) {
-      return;
+  loadUiPrefs(context: common.UIAbilityContext): Promise<void> {
+    if (this.uiPrefs === undefined) {
+      this.uiPrefs = this.readUiPrefs(context);
     }
-    this.prefsLoaded = true;
+    return this.uiPrefs;
+  }
+
+  private async readUiPrefs(context: common.UIAbilityContext): Promise<void> {
     try {
       const pref = await preferences.getPreferences(context, UI_PREF_NAME);
       const themeMode = String(await pref.get('themeMode', 'system'));
@@ -214,11 +223,13 @@ export class AppStore {
       const trayOnClose = Boolean(await pref.get('trayOnClose', true));
       const immersiveLight = Boolean(await pref.get('immersiveLight', true));
       const micCue = Boolean(await pref.get('micCue', false));
+      const voiceMode = String(await pref.get('voiceMode', 'standard'));
       AppStorage.setOrCreate<boolean>('oopzGripEnabled', gripEnabled);
       this.setMicGain(undefined, micGain, false);
       AppStorage.setOrCreate<boolean>('oopzTrayOnClose', trayOnClose);
       AppStorage.setOrCreate<boolean>('oopzImmersiveLight', immersiveLight);
       AppStorage.setOrCreate<boolean>('oopzMicCue', micCue);
+      AppStorage.setOrCreate<VoiceMode>('oopzVoiceMode', voiceMode === 'native-voip' ? 'native-voip' : 'standard');
       this.applyThemeMode(context, themeMode);
     } catch {
       hilog.warn(0x0, TAG, 'loadUiPrefs failed');
@@ -257,6 +268,15 @@ export class AppStore {
     this.applyThemeMode(context, mode);
     if (context !== undefined) {
       this.saveUiPrefValue(context, 'themeMode', mode);
+    }
+  }
+
+  async setVoiceMode(context: common.UIAbilityContext | undefined, mode: VoiceMode): Promise<void> {
+    if (context !== undefined) await this.loadUiPrefs(context);
+    AppStorage.setOrCreate<VoiceMode>('oopzVoiceMode', mode);
+    if (context !== undefined) {
+      this.voiceModeSave = this.voiceModeSave.then(() => this.saveUiPrefValue(context, 'voiceMode', mode));
+      await this.voiceModeSave;
     }
   }
 
@@ -324,8 +344,8 @@ export class AppStore {
     if (context !== undefined) this.saveUiPrefValue(context, 'micCue', enabled);
   }
 
-  private saveUiPrefValue(context: common.UIAbilityContext, key: string, value: preferences.ValueType): void {
-    preferences.getPreferences(context, UI_PREF_NAME).then(async (pref) => {
+  private saveUiPrefValue(context: common.UIAbilityContext, key: string, value: preferences.ValueType): Promise<void> {
+    return preferences.getPreferences(context, UI_PREF_NAME).then(async (pref) => {
       await pref.put(key, value);
       await pref.flush();
     }).catch(() => {});

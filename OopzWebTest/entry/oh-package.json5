@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "description": "Native RTC and ArkWeb voice tests",
   "dependencies": {
-    "@shengwang/rtc-voice": "4.4.2"
+    "@shengwang/rtc-voice": "4.4.2",
+    "liboopz_voip_trial.so": "file:./src/main/cpp/types/liboopz_voip_trial"
   },
   "devDependencies": {},
   "dynamicDependencies": {}

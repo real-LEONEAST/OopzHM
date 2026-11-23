@@ -1,6 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { fileIo } from '@kit.CoreFileKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { DEFAULT_MIC_GAIN } from '../store/AppStore';
+import type { VoiceMode } from '../common/VoiceMode';
+import { CppVoipTrial } from './CppVoipTrial';
 import {
   AudioVolumeInfo, ChannelMediaOptions, Constants, IRtcEngineEventHandler, LogConfig, RtcEngine, RtcEngineConfig,
   RtcStats
@@ -20,6 +23,7 @@ export interface RtcCallEvents {
   reconnecting: () => void;
   connectionFailed: (reason: number) => void;
   microphoneChanged: (capturing: boolean, reason: number) => void;
+  systemStreams?: (captureId: number, playbackId: number) => void;
   peerCountChanged: (count: number) => void;
   peerJoined?: (uid: number) => void;
   peerOffline?: (uid: number) => void;
@@ -32,6 +36,7 @@ export interface RtcCallEvents {
 
 export class NativeRtcCall {
   private engine?: RtcEngine;
+  private cpp?: CppVoipTrial;
   private generation: number = 0;
   private joinedCue: string = '';
   private leftCue: string = '';
@@ -40,8 +45,13 @@ export class NativeRtcCall {
     return RtcEngine.getSdkVersion();
   }
 
-  start(context: common.UIAbilityContext, room: RtcRoom, events: RtcCallEvents, liveRoom: boolean = false,
-    micGain: number = DEFAULT_MIC_GAIN): void {
+  async start(context: common.UIAbilityContext, room: RtcRoom, events: RtcCallEvents, liveRoom: boolean = false,
+    micGain: number = DEFAULT_MIC_GAIN, mode: VoiceMode = 'standard'): Promise<boolean> {
+    if (mode === 'native-voip') {
+      const call = new CppVoipTrial(context, events, micGain);
+      this.cpp = call;
+      return call.start(room, liveRoom);
+    }
     const generation = ++this.generation;
     const isCurrent = (): boolean => generation === this.generation;
     const peers = new Set<number>();
@@ -154,13 +164,16 @@ export class NativeRtcCall {
     if (result !== 0) {
       throw new Error(`原生 SDK 拒绝进房（${result}）`);
     }
+    return true;
   }
 
   setMicrophone(enabled: boolean): number {
+    if (this.cpp !== undefined) return this.cpp.setMicrophone(enabled);
     return this.engine?.enableLocalAudio(enabled) ?? -1;
   }
 
   setSpeakerMuted(muted: boolean): number {
+    if (this.cpp !== undefined) return this.cpp.setSpeakerMuted(muted);
     const result = this.engine?.adjustPlaybackSignalVolume(muted ? 0 : 100) ?? -1;
     if (muted && result === 0) {
       this.engine?.stopEffect(1);
@@ -170,6 +183,10 @@ export class NativeRtcCall {
   }
 
   playRoomCue(joined: boolean): void {
+    if (this.cpp !== undefined) {
+      this.cpp.playRoomCue(joined);
+      return;
+    }
     const path = joined ? this.joinedCue : this.leftCue;
     if (path.length > 0) this.engine?.playEffect(joined ? 1 : 2, path, 0, 1, 0, 42, false);
   }
@@ -191,23 +208,30 @@ export class NativeRtcCall {
   }
 
   setUserVolume(uid: number, volume: number): number {
+    if (this.cpp !== undefined) return this.cpp.setUserVolume(uid, volume);
     return this.engine?.adjustUserPlaybackSignalVolume(uid, volume) ?? -1;
   }
 
   setRecordingVolume(volume: number): number {
+    if (this.cpp !== undefined) return this.cpp.setRecordingVolume(volume);
     return this.engine?.adjustRecordingSignalVolume(volume) ?? -1;
   }
 
   muteRemoteUser(uid: number, muted: boolean): number {
+    if (this.cpp !== undefined) return this.cpp.muteRemoteUser(uid, muted);
     return this.engine?.muteRemoteAudioStream(uid, muted) ?? -1;
   }
 
   renewToken(token: string): number {
+    if (this.cpp !== undefined) return this.cpp.renewToken(token);
     return this.engine?.renewToken(token) ?? -1;
   }
 
   async close(): Promise<void> {
     this.generation++;
+    const cpp = this.cpp;
+    this.cpp = undefined;
+    await cpp?.close();
     const engine = this.engine;
     this.engine = undefined;
     if (engine !== undefined) {

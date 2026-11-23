@@ -1,0 +1,5 @@
+{
+  "name": "liboopz_voip_trial.so",
+  "version": "1.0.0",
+  "types": "./index.d.ts"
+}

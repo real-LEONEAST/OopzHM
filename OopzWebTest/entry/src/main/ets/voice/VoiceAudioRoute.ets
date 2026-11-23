@@ -5,8 +5,11 @@ import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { image } from '@kit.ImageKit';
 import { http } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import type { VoiceMode } from '../common/VoiceMode';
 
 const TAG = 'OopzAudioRoute';
+// HarmonyOS can report the separate NearLink microphone descriptor on a phone.
+const NEARLINK_INPUT_TYPE = 32;
 
 export class VoiceRouteStatus {
   input: string = '';
@@ -16,6 +19,8 @@ export class VoiceRouteStatus {
   pickerType?: 'audio' | 'voice_call';
   independentInput: boolean = false;
   mediaInput: boolean = false;
+  voipStreams: boolean = false;
+  acousticEchoCancelerSupported?: boolean;
 }
 
 export interface VoiceCallCard {
@@ -58,11 +63,34 @@ export function voiceDeviceName(device: audio.AudioDeviceDescriptor | undefined)
   }
 }
 
+function externalInputName(name: string): string {
+  const trimmed = name.trim();
+  return trimmed === deviceInfo.marketName || trimmed === deviceInfo.productModel ? '' : trimmed;
+}
+
+function voiceInputName(input: audio.AudioDeviceDescriptor | undefined, output: audio.AudioDeviceDescriptor | undefined,
+  followsCallOutput: boolean): string {
+  if (input === undefined || input.deviceType === audio.DeviceType.MIC ||
+    input.deviceType === audio.DeviceType.INVALID || input.deviceType === audio.DeviceType.DEFAULT) {
+    return voiceDeviceName(input);
+  }
+  if (input.deviceType === audio.DeviceType.NEARLINK || Number(input.deviceType) === NEARLINK_INPUT_TYPE) {
+    if (followsCallOutput && output?.deviceType === audio.DeviceType.NEARLINK) {
+      const headset = externalInputName(output.name || '') || externalInputName(output.displayName || '');
+      if (headset.length > 0) return headset;
+    }
+    return externalInputName(input.name || '') || externalInputName(input.displayName || '') || '星闪耳机麦克风';
+  }
+  return externalInputName(input.name || '') || externalInputName(voiceDeviceName(input)) || '外接麦克风';
+}
+
 export class VoiceAudioRoute {
   private context?: common.UIAbilityContext;
   private manager?: audio.AudioSessionManager;
   private mixing?: Promise<void>;
   private ownsMixSession: boolean = false;
+  private mode: VoiceMode = 'standard';
+  private acousticEchoCancelerSupported?: boolean;
   private streamManager?: audio.AudioStreamManager;
   private session?: avSession.AVSession;
   private pickerType?: 'audio' | 'voice_call';
@@ -93,14 +121,24 @@ export class VoiceAudioRoute {
   private readonly onOutputDeviceChange = (_event: audio.CurrentOutputDeviceChangedEvent): void => { this.refresh(); };
   private readonly onInputDeviceChange = (_event: audio.CurrentInputDeviceChangedEvent): void => { this.refresh(); };
 
-  begin(context: common.UIAbilityContext, onChange: (status: VoiceRouteStatus) => void): void {
+  begin(context: common.UIAbilityContext, onChange: (status: VoiceRouteStatus) => void,
+    mode: VoiceMode = 'standard'): void {
     this.context = context;
     this.onChange = onChange;
+    this.mode = mode;
     try {
       const audioManager = audio.getAudioManager();
       this.manager = audioManager.getSessionManager();
       const streams = audioManager.getStreamManager();
       this.streamManager = streams;
+      if (mode === 'native-voip' && deviceInfo.apiAvailable(20)) {
+        try {
+          this.acousticEchoCancelerSupported =
+            streams.isAcousticEchoCancelerSupported(audio.SourceType.SOURCE_TYPE_VOICE_COMMUNICATION);
+        } catch {
+          hilog.debug(0x0, TAG, 'Echo cancellation capability unavailable');
+        }
+      }
       // The public stream records have no owner ID. Exclude pre-existing streams and only
       // report a new stream when there is a unique match or a previously identified ID.
       try {
@@ -132,6 +170,12 @@ export class VoiceAudioRoute {
     }
   }
 
+  identifySystemStreams(captureId: number, playbackId: number): void {
+    this.capturerId = captureId;
+    this.rendererId = playbackId;
+    this.refresh();
+  }
+
   async activateMixing(): Promise<void> {
     const manager = this.manager;
     if (manager === undefined || this.context === undefined) return;
@@ -139,6 +183,16 @@ export class VoiceAudioRoute {
     this.mixing = (async (): Promise<void> => {
       try {
         if (manager.isAudioSessionActivated()) return;
+        if (deviceInfo.apiAvailable(20)) {
+          try {
+            const scene = this.mode === 'native-voip' ?
+              audio.AudioSessionScene.AUDIO_SESSION_SCENE_VOICE_COMMUNICATION :
+              audio.AudioSessionScene.AUDIO_SESSION_SCENE_MEDIA;
+            manager.setAudioSessionScene(scene);
+          } catch (error) {
+            hilog.info(0x0, TAG, 'Audio session scene unavailable, code=%{public}d', (error as BusinessError).code);
+          }
+        }
         await manager.activateAudioSession({ concurrencyMode: audio.AudioConcurrencyMode.CONCURRENCY_MIX_WITH_OTHERS });
         this.ownsMixSession = true;
         hilog.info(0x0, TAG, 'Concurrent app audio session activated');
@@ -275,29 +329,37 @@ export class VoiceAudioRoute {
     if (this.context === undefined) return;
     const next = new VoiceRouteStatus();
     const isPc = deviceInfo.deviceType === '2in1';
+    const nativeVoip = this.mode === 'native-voip';
+    next.acousticEchoCancelerSupported = this.acousticEchoCancelerSupported;
     next.pickerType = this.pickerType;
     next.independentInput = isPc && deviceInfo.apiAvailable(20) &&
       canIUse('SystemCapability.Multimedia.AVSession.AVInputCast');
+    let outputDevice: audio.AudioDeviceDescriptor | undefined;
+    let activeUsage: audio.StreamUsage | undefined;
     try {
-      if (streams !== undefined && this.renderersBefore !== undefined) {
+      if (streams !== undefined && (nativeVoip || this.renderersBefore !== undefined)) {
         const candidates = streams.getCurrentAudioRendererInfoArraySync().filter((info) =>
-          !this.renderersBefore?.has(info.streamId));
+          nativeVoip ? info.streamId === this.rendererId : !this.renderersBefore?.has(info.streamId));
         const renderer = candidates.find((info) => info.streamId === this.rendererId) ??
           (candidates.length === 1 ? candidates[0] : undefined);
-        this.rendererId = renderer?.streamId;
-        this.lastUsage = renderer?.rendererInfo.usage ?? this.lastUsage;
+        if (!nativeVoip) this.rendererId = renderer?.streamId;
+        activeUsage = renderer?.rendererInfo.usage;
+        this.lastUsage = activeUsage ?? this.lastUsage;
         next.usage = this.lastUsage;
-        next.output = voiceDeviceName(renderer?.deviceDescriptors[0]);
+        outputDevice = renderer?.deviceDescriptors[0];
+        next.output = voiceDeviceName(outputDevice);
       }
-      if (streams !== undefined && this.capturersBefore !== undefined) {
+      if (streams !== undefined && (nativeVoip || this.capturersBefore !== undefined)) {
         const candidates = streams.getCurrentAudioCapturerInfoArraySync().filter((info) =>
-          !this.capturersBefore?.has(info.streamId));
+          nativeVoip ? info.streamId === this.capturerId : !this.capturersBefore?.has(info.streamId));
         const capturer = candidates.find((info) => info.streamId === this.capturerId) ??
           (candidates.length === 1 ? candidates[0] : undefined);
-        this.capturerId = capturer?.streamId;
+        if (!nativeVoip) this.capturerId = capturer?.streamId;
         this.lastInputSource = capturer?.capturerInfo.source ?? this.lastInputSource;
         next.source = this.lastInputSource;
-        next.input = voiceDeviceName(capturer?.deviceDescriptors[0]);
+        next.input = voiceInputName(capturer?.deviceDescriptors[0], outputDevice, !isPc && nativeVoip);
+        next.voipStreams = isCallUsage(activeUsage) &&
+          capturer?.capturerInfo.source === audio.SourceType.SOURCE_TYPE_VOICE_COMMUNICATION && capturer.muted !== true;
         next.mediaInput = isPc && !next.independentInput && next.source === audio.SourceType.SOURCE_TYPE_MIC &&
           this.manager !== undefined && deviceInfo.apiAvailable(21);
       }
@@ -312,7 +374,9 @@ export class VoiceAudioRoute {
     const previous = this.previous;
     if (next.usage === previous.usage && next.source === previous.source && next.input === previous.input &&
       next.output === previous.output && next.pickerType === previous.pickerType &&
-      next.independentInput === previous.independentInput && next.mediaInput === previous.mediaInput) return;
+      next.independentInput === previous.independentInput && next.mediaInput === previous.mediaInput &&
+      next.voipStreams === previous.voipStreams &&
+      next.acousticEchoCancelerSupported === previous.acousticEchoCancelerSupported) return;
     this.previous = next;
     hilog.info(0x0, TAG, 'Route observation usage=%{public}d source=%{public}d inputKnown=%{public}d outputKnown=%{public}d',
       next.usage ?? -1, next.source ?? -1, next.input.length > 0 ? 1 : 0, next.output.length > 0 ? 1 : 0);
@@ -380,6 +444,7 @@ export class VoiceAudioRoute {
     this.capturerId = undefined;
     this.lastUsage = undefined;
     this.lastInputSource = undefined;
+    this.acousticEchoCancelerSupported = undefined;
     this.previous = new VoiceRouteStatus();
     await this.selectingMediaInput?.catch(() => {});
     if (this.selectedMediaInput) {
