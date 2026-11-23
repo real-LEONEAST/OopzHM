@@ -1,18 +1,22 @@
 // Native Oopz REST client: password login + areas / channels / members / profiles / enter / keep-alive / leave.
 // Reproduces dsh-oopz-voice and oopz-sdk entirely inside the HarmonyOS app.
 
-import { util } from '@kit.ArkTS';
+import { url, util } from '@kit.ArkTS';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   OOPZ_API_BASE, OOPZ_APP_VERSION_NUMBER, OOPZ_CHANNEL, OOPZ_PLATFORM, OOPZ_SIGNING_KEY_PEM
 } from './OopzKeyMaterial';
 import { rsaEncryptPassword, rsaSignBase64 } from './OopzCrypto';
-import { md5HexUtf8 } from './Md5';
-import { httpSend, HttpResult } from './OopzHttp';
+import { md5Hex, md5HexUtf8 } from './Md5';
+import { httpSend, httpUploadBytes, HttpResult } from './OopzHttp';
 import { extractAppId } from './OopzToken';
 import { normalizeChatText } from './OopzChatText';
 
 const LOGIN_PATH: string = '/client/v1/login/v2/login';
+const CHAT_IMAGE_UPLOAD_PATH: string = '/rtc/v1/cos/v1/signedUploadUrl';
+const OOPZ_LEGACY_GATEWAY: string = 'https://gateway.oopz.cn';
+// Published by Oopz at https://staticcdn.oopz.cn/config/eo_gateways_web.json.
+const OOPZ_WEB_GATEWAY: string = 'https://gateway-n.oopz.cn';
 const TAG: string = 'OopzNative';
 const USER_AGENT: string =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
@@ -71,6 +75,35 @@ export interface OopzChatAttachment {
   displayName: string;
 }
 
+export const MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024;
+
+export interface OopzChatImage {
+  name: string;
+  width: number;
+  height: number;
+  bytes: ArrayBuffer;
+}
+
+export interface OopzUploadedChatImage extends OopzChatAttachment {
+  fileSize: number;
+  hash: string;
+  animated: boolean;
+}
+
+export interface OopzChatReference {
+  messageId: string;
+  senderUid: string;
+  content: string;
+  attachments: OopzChatAttachment[];
+  recalled?: boolean;
+}
+
+export interface OopzChatSendOptions {
+  clientMessageId?: string;
+  reference?: OopzChatReference;
+  image?: OopzUploadedChatImage;
+}
+
 export interface OopzChatMessage {
   messageId: string;
   clientMessageId: string;
@@ -80,6 +113,8 @@ export interface OopzChatMessage {
   content: string;
   timestampMs: number;
   attachments: OopzChatAttachment[];
+  referenceMessageId?: string;
+  reference?: OopzChatReference;
 }
 
 export interface OopzRoom {
@@ -274,28 +309,44 @@ interface ChatAttachmentRaw {
   displayName?: string;
 }
 
-interface ChatMessageRaw {
+export interface ChatMessageRaw {
   messageId?: string | number;
   id?: string | number;
   clientMessageId?: string;
   area?: string;
   channel?: string;
+  areaId?: string;
+  channelId?: string;
   person?: string | number;
   senderUid?: string | number;
   senderId?: string | number;
-  content?: string;
-  text?: string;
+  content?: string | number | null;
+  text?: string | number | null;
   timestamp?: string | number;
   attachments?: ChatAttachmentRaw[];
+  rawImage?: ChatAttachmentRaw;
+  referenceMessageId?: string | number | null;
+  recall?: boolean;
 }
 
 interface MessageBeforeData {
   messages?: ChatMessageRaw[];
+  referenceMessages?: ChatMessageRaw[];
 }
 
-interface MessageBeforeEnvelope {
+interface MessageBeforeEnvelope extends MessageBeforeData {
   data?: MessageBeforeData;
-  messages?: ChatMessageRaw[];
+}
+
+interface ChatImageUploadTicket {
+  signedUrl?: string;
+  file?: string;
+  auth?: string;
+  url?: string;
+}
+
+interface ChatImageUploadEnvelope extends ChatImageUploadTicket {
+  data?: ChatImageUploadTicket;
 }
 
 interface SendMessagePayload {
@@ -313,7 +364,7 @@ interface SendMessagePayload {
   animated: boolean;
   displayName: string;
   duration: number;
-  attachments: ChatAttachmentRaw[];
+  attachments: OopzUploadedChatImage[];
 }
 
 interface SendMessageBody {
@@ -358,38 +409,61 @@ function parseTimestampMs(raw: string | number | undefined | null): number {
   return Date.now();
 }
 
-function parseChatMessageRaw(item: ChatMessageRaw, areaFallback: string, channelFallback: string): OopzChatMessage {
+export function toChatReference(message: OopzChatMessage): OopzChatReference {
+  return {
+    messageId: message.messageId,
+    senderUid: message.senderUid,
+    content: message.content,
+    attachments: message.attachments
+  };
+}
+
+export function newChatClientMessageId(): string {
+  const baseId = (Date.now() * 1000) % 10000000000000;
+  return String(baseId * 100 + Math.floor(Math.random() * 90) + 10);
+}
+
+function httpsImageUrl(value: string): boolean {
+  try {
+    const parsed = url.URL.parseURL(value);
+    return parsed.protocol === 'https:' && !!parsed.hostname && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
+export function parseChatMessageRaw(item: ChatMessageRaw, areaFallback: string = '',
+  channelFallback: string = ''): OopzChatMessage {
   const messageId = asString(item.messageId).length > 0 ? asString(item.messageId) : asString(item.id);
   const sender = asString(item.person).length > 0
     ? asString(item.person)
     : (asString(item.senderUid).length > 0 ? asString(item.senderUid) : asString(item.senderId));
   const content = normalizeChatText(item.content, item.text);
   const attachments: OopzChatAttachment[] = [];
-  if (Array.isArray(item.attachments)) {
-    for (const att of item.attachments) {
-      const url = asString(att.url);
-      if (url.length === 0) {
-        continue;
-      }
-      attachments.push({
-        attachmentType: asString(att.attachmentType).length > 0 ? asString(att.attachmentType) : 'IMAGE',
-        url: url,
-        fileKey: asString(att.fileKey),
-        width: typeof att.width === 'number' ? att.width : 0,
-        height: typeof att.height === 'number' ? att.height : 0,
-        displayName: asString(att.displayName)
-      });
-    }
+  const rawAttachments = Array.isArray(item.attachments) && item.attachments.length > 0 ?
+    item.attachments : (item.rawImage ? [item.rawImage] : []);
+  for (const att of rawAttachments) {
+    if (!att || !asString(att.url)) continue;
+    attachments.push({
+      attachmentType: asString(att.attachmentType) || 'IMAGE',
+      url: asString(att.url),
+      fileKey: asString(att.fileKey),
+      width: Number(att.width) || 0,
+      height: Number(att.height) || 0,
+      displayName: asString(att.displayName)
+    });
   }
+  const referenceId = asString(item.referenceMessageId);
   return {
     messageId: messageId,
     clientMessageId: asString(item.clientMessageId),
-    areaId: asString(item.area).length > 0 ? asString(item.area) : areaFallback,
-    channelId: asString(item.channel).length > 0 ? asString(item.channel) : channelFallback,
+    areaId: asString(item.area) || asString(item.areaId) || areaFallback,
+    channelId: asString(item.channel) || asString(item.channelId) || channelFallback,
     senderUid: sender,
     content: content,
     timestampMs: parseTimestampMs(item.timestamp),
-    attachments: attachments
+    attachments: attachments,
+    referenceMessageId: referenceId && referenceId !== '0' ? referenceId : undefined
   };
 }
 
@@ -499,11 +573,11 @@ export class OopzSession {
     return headers;
   }
 
-  private async send(path: string, method: string, body?: string): Promise<HttpResult> {
+  private async send(path: string, method: string, body?: string, gateway: string = OOPZ_API_BASE): Promise<HttpResult> {
     const cred = this.requireCred();
     const header = await this.makeApiHeaders(cred.deviceId, cred.personUid, cred.jwtToken, path,
       body === undefined ? '' : body);
-    return await httpSend(method, OOPZ_API_BASE + path, header, body);
+    return await httpSend(method, gateway + path, header, body);
   }
 
   async signedSend(path: string, method: string, body?: string): Promise<HttpResult> {
@@ -545,8 +619,9 @@ export class OopzSession {
     }
   }
 
-  private async requestJson(path: string, method: string, body?: string): Promise<Object> {
-    const result = await this.send(path, method, body);
+  private async requestJson(path: string, method: string, body?: string,
+    gateway: string = OOPZ_API_BASE): Promise<Object> {
+    const result = await this.send(path, method, body, gateway);
     hilog.info(0x0, TAG, 'api %{public}s %{public}s -> %{public}d', method, path, result.status);
     let parsed: Object | undefined = undefined;
     if (result.text.length > 0) {
@@ -850,9 +925,22 @@ export class OopzSession {
     const raw = await this.requestJson('/im/session/v2/messageBefore' + query, 'GET');
     const env = raw as MessageBeforeEnvelope;
     const list: ChatMessageRaw[] = env.data?.messages ?? env.messages ?? [];
+    const references = new Map<string, OopzChatReference>();
+    for (const item of env.data?.referenceMessages ?? env.referenceMessages ?? []) {
+      const original = parseChatMessageRaw(item, areaId, channelId);
+      if (!original.messageId || original.areaId !== areaId || original.channelId !== channelId) continue;
+      const reference = toChatReference(original);
+      if (item.recall === true) {
+        reference.recalled = true;
+        reference.content = '';
+        reference.attachments = [];
+      }
+      references.set(original.messageId, reference);
+    }
     const out: OopzChatMessage[] = [];
     for (const item of list) {
       const msg = parseChatMessageRaw(item, areaId, channelId);
+      if (msg.referenceMessageId) msg.reference = references.get(msg.referenceMessageId);
       if (msg.messageId.length > 0 || msg.content.length > 0 || msg.attachments.length > 0) {
         out.push(msg);
       }
@@ -866,33 +954,97 @@ export class OopzSession {
     return out;
   }
 
-  async sendChannelMessage(areaId: string, channelId: string, text: string): Promise<OopzChatMessage> {
+  private async requestChatImageUpload(): Promise<ChatImageUploadTicket> {
+    const gateway = OOPZ_API_BASE === OOPZ_LEGACY_GATEWAY ? OOPZ_WEB_GATEWAY : OOPZ_API_BASE;
+    const body = JSON.stringify({ type: 'IMAGE', ext: '.webp' });
+    try {
+      const envelope = await this.requestJson(CHAT_IMAGE_UPLOAD_PATH, 'PUT', body, gateway) as ChatImageUploadEnvelope;
+      return envelope.data ?? envelope;
+    } catch (error) {
+      throw new Error('申请图片上传地址失败：' + (error as Error).message);
+    }
+  }
+
+  async uploadChatImage(image: OopzChatImage): Promise<OopzUploadedChatImage> {
+    const cred = this.requireCred();
+    const fileSize = image.bytes.byteLength;
+    if (fileSize === 0 || fileSize > MAX_CHAT_IMAGE_BYTES || image.width <= 0 || image.height <= 0) {
+      throw new Error('图片文件大小或尺寸无效');
+    }
+    const ticket = await this.requestChatImageUpload();
+    if (this.getCred() !== cred) throw new Error('Oopz 会话已切换');
+    const uploadUrl = asString(ticket.signedUrl);
+    const downloadUrl = asString(ticket.url);
+    const fileKey = asString(ticket.file);
+    if (!httpsImageUrl(uploadUrl) || !httpsImageUrl(downloadUrl) || !fileKey || /[()\s]/.test(fileKey)) {
+      throw new Error('Oopz 未返回有效的图片上传地址');
+    }
+    const headers: Record<string, string> = { 'Content-Type': 'image/webp' };
+    if (ticket.auth) headers['Authorization'] = ticket.auth;
+    let status: number;
+    try {
+      status = await httpUploadBytes(uploadUrl, headers, image.bytes);
+    } catch {
+      throw new Error('图片上传失败，请重试');
+    }
+    if (status < 200 || status >= 300) throw new Error('图片上传失败（HTTP ' + status + '）');
+    if (this.getCred() !== cred) throw new Error('Oopz 会话已切换');
+    return {
+      attachmentType: 'IMAGE',
+      fileKey: fileKey,
+      url: downloadUrl,
+      width: image.width,
+      height: image.height,
+      displayName: image.name,
+      fileSize: fileSize,
+      hash: md5Hex(new Uint8Array(image.bytes)),
+      animated: false
+    };
+  }
+
+  async sendChannelMessage(areaId: string, channelId: string, text: string,
+    options?: OopzChatSendOptions): Promise<OopzChatMessage> {
     const cred = this.requireCred();
     const nowMs = Date.now();
     const nowUs = nowMs * 1000;
-    const baseId = nowUs % 10000000000000;
-    const suffix = Math.floor(Math.random() * 90) + 10;
-    const clientMessageId = String(baseId * 100 + suffix);
+    const clientMessageId = options?.clientMessageId ?? newChatClientMessageId();
+    const reference = options?.reference;
+    const image = options?.image;
+    let content = text;
+    if (image !== undefined) {
+      const marker = '![IMAGEw' + image.width + 'h' + image.height + '](' + image.fileKey + ')';
+      content = text ? text + '\n' + marker : marker;
+    }
     const body: SendMessageBody = {
       message: {
         area: areaId,
         channel: channelId,
         target: '',
-        text: text,
-        content: text,
+        text: content,
+        content: content,
         clientMessageId: clientMessageId,
         timestamp: String(nowUs),
         isMentionAll: false,
         mentionList: [],
         styleTags: [],
-        referenceMessageId: null,
+        referenceMessageId: reference?.messageId ?? null,
         animated: false,
         displayName: '',
         duration: 0,
-        attachments: []
+        attachments: image ? [image] : []
       }
     };
-    const raw = await this.requestJson('/im/session/v2/sendGimMessage', 'POST', JSON.stringify(body));
+    let path = '/im/session/v2/sendGimMessage';
+    if (image) {
+      path += '?a=' + encodeURIComponent(areaId) + '&c=' + encodeURIComponent(channelId);
+    }
+    let raw: Object;
+    try {
+      raw = await this.requestJson(path, 'POST', JSON.stringify(body));
+    } catch (error) {
+      if (image) throw new Error('提交图片消息失败：' + (error as Error).message);
+      throw error as Error;
+    }
     const env = raw as SendMessageEnvelope;
     const data: SendMessageData = env.data !== undefined ? env.data : {
       messageId: env.messageId,
@@ -908,9 +1060,11 @@ export class OopzSession {
       areaId: areaId,
       channelId: channelId,
       senderUid: cred.personUid,
-      content: text,
+      content: content,
       timestampMs: tsRaw !== undefined ? parseTimestampMs(tsRaw) : nowMs,
-      attachments: []
+      attachments: image ? [image] : [],
+      referenceMessageId: reference?.messageId,
+      reference: reference
     };
   }
 

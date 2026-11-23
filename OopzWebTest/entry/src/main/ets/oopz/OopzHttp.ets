@@ -21,21 +21,22 @@ function methodOf(method: string): http.RequestMethod {
   return http.RequestMethod.GET;
 }
 
-async function sendPatchWithRcp(url: string, header: Record<string, string>, body?: string): Promise<HttpResult> {
+async function sendWithRcp(method: 'PATCH' | 'PUT', url: string, header: Record<string, string>,
+  body?: string | ArrayBuffer): Promise<HttpResult> {
   const rcpHeaders: rcp.RequestHeaders = {};
   const keys = Object.keys(header);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     rcpHeaders[key] = header[key];
   }
-  const payload: string | undefined = (body !== undefined && body.length > 0) ? body : undefined;
-  const req = new rcp.Request(url, 'PATCH', rcpHeaders, payload);
+  const req = new rcp.Request(url, method, rcpHeaders, body === '' ? undefined : body);
   const session = rcp.createSession({
     requestConfiguration: {
       transfer: {
+        autoRedirect: method === 'PUT' ? false : undefined,
         timeout: {
           connectMs: 8000,
-          transferMs: 25000
+          transferMs: method === 'PUT' ? 60000 : 25000
         }
       }
     }
@@ -49,10 +50,15 @@ async function sendPatchWithRcp(url: string, header: Record<string, string>, bod
   }
 }
 
+export async function httpUploadBytes(url: string, header: Record<string, string>, body: ArrayBuffer): Promise<number> {
+  const response = await sendWithRcp('PUT', url, header, body);
+  return response.status;
+}
+
 export async function httpSend(method: string, url: string, header: Record<string, string>,
   body?: string): Promise<HttpResult> {
   if (method === 'PATCH') {
-    return await sendPatchWithRcp(url, header, body);
+    return await sendWithRcp('PATCH', url, header, body);
   }
   const request = http.createHttp();
   try {

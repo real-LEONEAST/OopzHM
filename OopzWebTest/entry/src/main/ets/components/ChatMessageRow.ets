@@ -14,6 +14,12 @@ export interface ChatMessageItem {
   cleanText: string;
   textRuns: ChatTextRun[];
   attachments: OopzChatAttachment[];
+  reference?: ChatReferenceView;
+}
+
+export interface ChatReferenceView {
+  author: string;
+  excerpt: string;
 }
 
 export interface ChatTextRun {
@@ -23,7 +29,44 @@ export interface ChatTextRun {
 
 function isChatImage(att: OopzChatAttachment): boolean {
   const kind = att.attachmentType.toUpperCase();
-  return att.url.trim().length > 0 && (kind === 'IMAGE' || kind.startsWith('IMAGE/'));
+  return att.url.trim().length > 0 && (kind === 'IMAGE' || kind === 'RAWIMAGE' || kind.startsWith('IMAGE/'));
+}
+
+export function chatMessageExcerpt(text: string, attachments: OopzChatAttachment[]): string {
+  if (text.trim()) return text;
+  if (attachments.length === 0) return '消息';
+  return attachments.some((attachment: OopzChatAttachment): boolean => isChatImage(attachment)) ? '[图片]' : '[附件]';
+}
+
+@Component
+export struct ChatReferenceStrip {
+  @Prop reference: ChatReferenceView;
+  @Prop isDark: boolean = true;
+  @Prop inComposer: boolean = false;
+  @Prop canRemove: boolean = false;
+  onRemove: () => void = () => {};
+
+  build() {
+    Row({ space: 8 }) {
+      Column()
+        .width(3).height(26).borderRadius(2).backgroundColor(getTheme(this.isDark).accent)
+      Column({ space: 2 }) {
+        if (this.reference.author) {
+          Text(this.reference.author).fontSize(12).fontWeight(FontWeight.Medium)
+            .fontColor(getTheme(this.isDark).text).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        Text(this.reference.excerpt).fontSize(12).fontColor(getTheme(this.isDark).textSecondary)
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+      }.layoutWeight(1).alignItems(HorizontalAlign.Start)
+      if (this.inComposer) {
+        Button('×').width(34).height(34).fontSize(18).backgroundColor(Color.Transparent)
+          .fontColor(getTheme(this.isDark).textSecondary).accessibilityText('取消引用')
+          .enabled(this.canRemove).onClick(() => { this.onRemove(); })
+      }
+    }.width('100%').constraintSize(this.inComposer ? {} : { maxWidth: 260 })
+      .padding({ left: 9, right: 8, top: 4, bottom: 4 })
+      .borderRadius(8).backgroundColor(getTheme(this.isDark).surfaceAlt)
+  }
 }
 
 @Component
@@ -32,21 +75,20 @@ export struct ChatMessageRow {
   @Prop isDark: boolean = true;
   @Prop oopzEmojiFontReady: boolean = false;
   @Prop isDesktop: boolean = false;
-  @Prop canRecall: boolean = false;
-  onRecallMenu: (item: ChatMessageItem, windowX: number, windowY: number) => void = () => {};
+  onMessageMenu: (item: ChatMessageItem, windowX: number, windowY: number) => void = () => {};
   onPreview: (att: OopzChatAttachment) => void = () => {};
   private readonly textController: TextController = new TextController();
   private selectionMenuTimer: number = -1;
 
   aboutToDisappear(): void { clearTimeout(this.selectionMenuTimer); }
 
-  private allowsRecall(): boolean {
-    return this.canRecall && this.item.isSelf && this.item.messageId.length > 0;
+  private hasActions(): boolean {
+    return this.item.messageId.length > 0;
   }
 
   private readonly textMenu: EditMenuOptions = {
     onCreateMenu: (items: TextMenuItem[]): TextMenuItem[] => {
-      if (!this.isDesktop || !this.allowsRecall()) return items;
+      if (!this.isDesktop || !this.hasActions()) return items;
       // ArkUI creates a dismissible selection overlay even for an empty item list.
       // Release it after creation so the first click reaches the message action.
       clearTimeout(this.selectionMenuTimer);
@@ -57,9 +99,9 @@ export struct ChatMessageRow {
   };
 
   private handleMouse(event: MouseEvent): void {
-    if (this.isDesktop && this.allowsRecall() && event.button === MouseButton.Right && event.action === MouseAction.Press) {
+    if (this.isDesktop && this.hasActions() && event.button === MouseButton.Right && event.action === MouseAction.Press) {
       event.stopPropagation();
-      this.onRecallMenu(this.item, event.windowX, event.windowY);
+      this.onMessageMenu(this.item, event.windowX, event.windowY);
     }
   }
 
@@ -81,7 +123,7 @@ export struct ChatMessageRow {
       .fontSize(14)
       .fontColor(getTheme(this.isDark).text)
       .lineHeight(this.item.textRuns.length > 0 ? 27 : 20)
-      .copyOption(!this.isDesktop && this.allowsRecall() ? CopyOptions.None : CopyOptions.InApp)
+      .copyOption(!this.isDesktop && this.hasActions() ? CopyOptions.None : CopyOptions.InApp)
       .editMenuOptions(this.textMenu)
       .onMouse((event: MouseEvent) => { this.handleMouse(event); })
       .padding({ left: 12, right: 12, top: 8, bottom: 8 })
@@ -103,10 +145,10 @@ export struct ChatMessageRow {
 
   @Builder
   private attachment(att: OopzChatAttachment) {
-    if (!this.isDesktop && this.allowsRecall()) {
+    if (!this.isDesktop && this.hasActions()) {
       Stack() { this.thumbnail(att) }
         .gesture(GestureGroup(GestureMode.Exclusive,
-          LongPressGesture({ duration: 470 }).onAction(() => { this.onRecallMenu(this.item, 0, 0); }),
+          LongPressGesture({ duration: 470 }).onAction(() => { this.onMessageMenu(this.item, 0, 0); }),
           TapGesture().onAction(() => { if (isChatImage(att)) this.onPreview(att); })
         ))
     } else if (isChatImage(att)) {
@@ -159,10 +201,14 @@ export struct ChatMessageRow {
             .fontColor(getTheme(this.isDark).textMuted)
         }
 
+        if (this.item.reference !== undefined) {
+          ChatReferenceStrip({ reference: this.item.reference, isDark: this.isDark })
+        }
+
         if (this.item.cleanText.length > 0) {
-          if (!this.isDesktop && this.allowsRecall()) {
+          if (!this.isDesktop && this.hasActions()) {
             Stack() { this.textBubble() }
-              .gesture(LongPressGesture({ duration: 470 }).onAction(() => { this.onRecallMenu(this.item, 0, 0); }))
+              .gesture(LongPressGesture({ duration: 470 }).onAction(() => { this.onMessageMenu(this.item, 0, 0); }))
           } else {
             this.textBubble()
           }
@@ -189,11 +235,19 @@ export struct ChatMessageRow {
 }
 
 const MENU_WIDTH: number = 178;
-const MENU_HEIGHT: number = 100;
+const MENU_ROW_HEIGHT: number = 42;
+const MENU_SPACING: number = 4;
+const MENU_PADDING: number = 6;
 const MENU_EDGE: number = 6;
+const MENU_REPLY = 'chat-action-reply';
+const MENU_COPY = 'chat-action-copy';
+const MENU_RECALL = 'chat-action-recall';
+const MENU_CANCEL = 'chat-action-cancel';
+const MENU_CONFIRM = 'chat-action-confirm';
+const MENU_OVERLAY = 'chat-action-overlay';
 
 @Component
-export struct ChatRecallOverlay {
+export struct ChatMessageActions {
   @Prop item: ChatMessageItem;
   @Prop isDark: boolean = true;
   @Prop isDesktop: boolean = false;
@@ -202,15 +256,17 @@ export struct ChatRecallOverlay {
   @Prop @Watch('focusOverlay') confirming: boolean = false;
   @Prop @Watch('focusOverlay') busy: boolean = false;
   onDismiss: () => void = () => {};
+  onReply: () => void = () => {};
+  onCopy: () => void = () => {};
   onChooseRecall: () => void = () => {};
   onSubmit: () => void = () => {};
 
   @State private viewportWidth: number = MENU_WIDTH + MENU_EDGE * 2;
-  @State private viewportHeight: number = MENU_HEIGHT + MENU_EDGE * 2;
+  @State private viewportHeight: number = 200;
   @State private originX: number = 0;
   @State private originY: number = 0;
   private focusTimer: number = -1;
-  private firstFocused: boolean = true;
+  private focusedItem: string = '';
 
   aboutToAppear(): void { this.focusOverlay(); }
 
@@ -219,8 +275,23 @@ export struct ChatRecallOverlay {
   private focusOverlay(): void {
     clearTimeout(this.focusTimer);
     this.focusTimer = setTimeout(() => {
-      this.getUIContext().getFocusController().requestFocus(this.busy ? 'chat-recall-overlay' : 'chat-recall-first');
+      const first = this.busy ? MENU_OVERLAY : this.menuItems()[0];
+      this.getUIContext().getFocusController().requestFocus(first);
     }, 0);
+  }
+
+  private menuItems(): string[] {
+    if (this.confirming) return [MENU_CANCEL, MENU_CONFIRM];
+    const items = [MENU_REPLY];
+    if (this.item.cleanText.trim()) items.push(MENU_COPY);
+    if (this.item.isSelf) items.push(MENU_RECALL);
+    items.push(MENU_CANCEL);
+    return items;
+  }
+
+  private menuHeight(): number {
+    const count = this.menuItems().length;
+    return count * MENU_ROW_HEIGHT + (count - 1) * MENU_SPACING + MENU_PADDING * 2;
   }
 
   private onOverlayKey(event: KeyEvent): boolean {
@@ -228,7 +299,13 @@ export struct ChatRecallOverlay {
     if (event.keyCode === KeyCode.KEYCODE_ESCAPE) {
       if (!this.busy) this.onDismiss();
     } else if (event.keyCode === KeyCode.KEYCODE_TAB) {
-      if (!this.busy) this.getUIContext().getFocusController().requestFocus(this.firstFocused ? 'chat-recall-second' : 'chat-recall-first');
+      if (!this.busy) {
+        const items = this.menuItems();
+        const index = items.indexOf(this.focusedItem);
+        const direction = event.getModifierKeyState?.(['Shift']) ? -1 : 1;
+        const next = index < 0 ? 0 : (index + direction + items.length) % items.length;
+        this.getUIContext().getFocusController().requestFocus(items[next]);
+      }
     } else {
       return false;
     }
@@ -236,25 +313,27 @@ export struct ChatRecallOverlay {
     return true;
   }
 
-  private excerpt(): string {
-    if (this.item.cleanText.trim().length > 0) return this.item.cleanText;
-    const att = this.item.attachments[0];
-    if (att === undefined) return this.item.senderName + '的消息';
-    return (isChatImage(att) ? '[图片]' : '[附件]') + (att.displayName ? ' ' + att.displayName : '');
+  @Builder
+  private menuButton(label: string, key: string, action: () => void) {
+    Button(label, { type: ButtonType.Normal }).id(key)
+      .width('100%').height(MENU_ROW_HEIGHT).borderRadius(8).backgroundColor(Color.Transparent)
+      .fontColor(key === MENU_RECALL ? (this.isDark ? '#FFB4AF' : getTheme(this.isDark).dangerFill) :
+        getTheme(this.isDark).text)
+      .onFocus(() => { this.focusedItem = key; }).onClick(action)
   }
 
   @Builder
   private menu() {
-    Column({ space: 4 }) {
-      Button('撤回消息…', { type: ButtonType.Normal }).id('chat-recall-first')
-        .width('100%').height(42).borderRadius(8).backgroundColor(Color.Transparent)
-        .fontColor(this.isDark ? '#FFB4AF' : getTheme(this.isDark).dangerFill)
-        .onFocus(() => { this.firstFocused = true; }).onClick(() => { this.onChooseRecall(); })
-      Button('取消', { type: ButtonType.Normal }).id('chat-recall-second')
-        .width('100%').height(42).borderRadius(8).backgroundColor(Color.Transparent)
-        .fontColor(getTheme(this.isDark).text)
-        .onFocus(() => { this.firstFocused = false; }).onClick(() => { this.onDismiss(); })
-    }.width('100%').padding(6).borderRadius(AppSpacing.radiusSm)
+    Column({ space: MENU_SPACING }) {
+      this.menuButton('引用回复', MENU_REPLY, () => { this.onReply(); })
+      if (this.item.cleanText.trim()) {
+        this.menuButton('复制文字', MENU_COPY, () => { this.onCopy(); })
+      }
+      if (this.item.isSelf) {
+        this.menuButton('撤回消息…', MENU_RECALL, () => { this.onChooseRecall(); })
+      }
+      this.menuButton('取消', MENU_CANCEL, () => { this.onDismiss(); })
+    }.width('100%').padding(MENU_PADDING).borderRadius(AppSpacing.radiusSm)
       .backgroundColor(getTheme(this.isDark).surfaceSolid)
       .border({ width: 1, color: getTheme(this.isDark).border })
   }
@@ -263,15 +342,16 @@ export struct ChatRecallOverlay {
   private confirmation() {
     Column({ space: 12 }) {
       Text('撤回这条消息？').fontSize(18).fontWeight(FontWeight.Medium).fontColor(getTheme(this.isDark).text)
-      Text(this.excerpt()).width('100%').fontSize(14).fontColor(getTheme(this.isDark).textSecondary)
+      Text(chatMessageExcerpt(this.item.cleanText, this.item.attachments)).width('100%')
+        .fontSize(14).fontColor(getTheme(this.isDark).textSecondary)
         .maxLines(3).textOverflow({ overflow: TextOverflow.Ellipsis })
       Row({ space: 8 }) {
-        Button('取消').id('chat-recall-first').height(36).fontSize(14).enabled(!this.busy)
+        Button('取消').id(MENU_CANCEL).height(36).fontSize(14).enabled(!this.busy)
           .backgroundColor(getTheme(this.isDark).surfaceAlt).fontColor(getTheme(this.isDark).text)
-          .onFocus(() => { this.firstFocused = true; }).onClick(() => { this.onDismiss(); })
-        Button(this.busy ? '正在撤回…' : '确认撤回').id('chat-recall-second').height(36).fontSize(14).enabled(!this.busy)
+          .onFocus(() => { this.focusedItem = MENU_CANCEL; }).onClick(() => { this.onDismiss(); })
+        Button(this.busy ? '正在撤回…' : '确认撤回').id(MENU_CONFIRM).height(36).fontSize(14).enabled(!this.busy)
           .backgroundColor(getTheme(this.isDark).dangerFill).fontColor(getTheme(this.isDark).dangerText)
-          .onFocus(() => { this.firstFocused = false; }).onClick(() => { if (!this.busy) this.onSubmit(); })
+          .onFocus(() => { this.focusedItem = MENU_CONFIRM; }).onClick(() => { if (!this.busy) this.onSubmit(); })
       }.width('100%').justifyContent(FlexAlign.End)
     }.width('90%').constraintSize({ maxWidth: 340 }).padding(AppSpacing.card).borderRadius(AppSpacing.radius)
       .backgroundColor(getTheme(this.isDark).surfaceSolid).alignItems(HorizontalAlign.Start)
@@ -289,12 +369,12 @@ export struct ChatRecallOverlay {
           .width(Math.min(MENU_WIDTH, Math.max(1, this.viewportWidth - MENU_EDGE * 2)))
           .position({
             x: Math.max(MENU_EDGE, Math.min(this.windowX - this.originX, this.viewportWidth - MENU_WIDTH - MENU_EDGE)),
-            y: Math.max(MENU_EDGE, Math.min(this.windowY - this.originY, this.viewportHeight - MENU_HEIGHT - MENU_EDGE))
+            y: Math.max(MENU_EDGE, Math.min(this.windowY - this.originY, this.viewportHeight - this.menuHeight() - MENU_EDGE))
           })
       } else {
         Column() { this.menu() }.width('100%').padding({ left: 10, right: 10, bottom: 10 })
       }
-    }.width('100%').height('100%').id('chat-recall-overlay').focusable(true)
+    }.width('100%').height('100%').id(MENU_OVERLAY).focusable(true)
       .onAreaChange((_previous: Area, area: Area) => {
         this.viewportWidth = Number(area.width);
         this.viewportHeight = Number(area.height);

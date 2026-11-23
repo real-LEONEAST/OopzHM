@@ -18,7 +18,7 @@ import {
   OopzChannelGroup, OopzPrivilege
 } from '../oopz/OopzAreaAdmin';
 import type {
-  OopzArea, OopzChannelMember, OopzChatMessage, OopzCred, OopzPersonInfo, OopzVoiceChannel
+  OopzArea, OopzChannelMember, OopzChatMessage, OopzChatSendOptions, OopzCred, OopzPersonInfo, OopzVoiceChannel
 } from '../oopz/OopzSession';
 
 const TAG: string = 'OopzStore';
@@ -538,15 +538,29 @@ export class AppStore {
     const current = this.messagesByChannel.get(channelId) ?? [];
     const existing = before ? current : current.filter((msg: OopzChatMessage): boolean => !previous.includes(msg));
     const merged = this.updateChatCache(channelId, fetched.concat(existing));
-    await this.ensurePersons(merged.map((msg: OopzChatMessage): string => msg.senderUid));
+    const senderUids: string[] = [];
+    for (const msg of merged) {
+      senderUids.push(msg.senderUid);
+      if (msg.reference) senderUids.push(msg.reference.senderUid);
+    }
+    await this.ensurePersons(senderUids);
     if (this.session.getCred() !== cred) return [];
     this.chatListener?.(channelId, 'history');
     return this.messagesByChannel.get(channelId) ?? [];
   }
 
-  async sendChannelMessage(areaId: string, channelId: string, text: string): Promise<OopzChatMessage> {
+  async sendChannelMessage(areaId: string, channelId: string, text: string,
+    options?: OopzChatSendOptions): Promise<OopzChatMessage> {
     const cred = this.session.getCred();
-    const sent = await this.session.sendChannelMessage(areaId, channelId, text);
+    if (cred && options?.clientMessageId) {
+      const acknowledged = this.messagesByChannel.get(channelId)?.find((msg: OopzChatMessage): boolean =>
+        !!msg.messageId && msg.clientMessageId === options.clientMessageId && msg.senderUid === cred.personUid);
+      if (acknowledged) return acknowledged;
+    }
+    if (options?.reference && this.isChatMessageRecalled(channelId, options.reference.messageId)) {
+      throw new Error('引用的消息已撤回，请取消引用后再发送');
+    }
+    const sent = await this.session.sendChannelMessage(areaId, channelId, text, options);
     if (this.session.getCred() !== cred) return sent;
     this.appendMessage(channelId, sent);
     this.chatListener?.(channelId, 'append');
@@ -559,6 +573,10 @@ export class AppStore {
 
   private clientMessageKey(msg: OopzChatMessage): string {
     return msg.clientMessageId ? 'client/' + msg.senderUid + '/' + msg.clientMessageId : '';
+  }
+
+  isChatMessageRecalled(channelId: string, messageId: string): boolean {
+    return this.recalledIds.get(channelId)?.has(messageId) ?? false;
   }
 
   private updateChatCache(channelId: string, messages: OopzChatMessage[]): OopzChatMessage[] {
@@ -581,8 +599,30 @@ export class AppStore {
       if (index === undefined) {
         if (key) positions.set(key, merged.length);
         merged.push(msg);
-      } else if (msg.messageId && (!merged[index].messageId || (!merged[index].clientMessageId && msg.clientMessageId))) {
-        merged[index] = msg;
+      } else {
+        const cached = merged[index];
+        const preferIncoming = !!msg.messageId && (!cached.messageId || (!cached.clientMessageId && !!msg.clientMessageId));
+        const primary = preferIncoming ? msg : cached;
+        const fallback = preferIncoming ? cached : msg;
+        const referenceId = primary.referenceMessageId || fallback.referenceMessageId;
+        const fallbackReference = fallback.reference?.messageId === referenceId ? fallback.reference : undefined;
+        const reference = fallbackReference?.recalled ? fallbackReference : (primary.reference ?? fallbackReference);
+        if (referenceId !== primary.referenceMessageId || reference !== primary.reference) {
+          merged[index] = {
+            messageId: primary.messageId,
+            clientMessageId: primary.clientMessageId,
+            areaId: primary.areaId,
+            channelId: primary.channelId,
+            senderUid: primary.senderUid,
+            content: primary.content,
+            timestampMs: primary.timestampMs,
+            attachments: primary.attachments,
+            referenceMessageId: referenceId,
+            reference: reference
+          };
+        } else {
+          merged[index] = primary;
+        }
       }
     }
     merged.sort((a: OopzChatMessage, b: OopzChatMessage): number => a.timestampMs - b.timestampMs);

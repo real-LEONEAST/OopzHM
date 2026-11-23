@@ -3,14 +3,16 @@ import { util } from '@kit.ArkTS';
 import { audio } from '@kit.AudioKit';
 import { AVInputCastPicker, AVCastPickerState } from '@kit.AVSessionKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
-import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { window } from '@kit.ArkUI';
 import { KeyCode } from '@kit.InputKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { PRODUCT_NAME } from 'BuildProfile';
 import type { AudioVolumeInfo, NativeRtcCall, RtcCallEvents, RtcRoom } from '../voice/NativeRtcCall';
+import { newChatClientMessageId, toChatReference } from '../oopz/OopzSession';
 import type {
-  OopzArea, OopzChannelMember, OopzChatAttachment, OopzChatMessage, OopzPersonInfo, OopzVoiceChannel
+  OopzArea, OopzChannelMember, OopzChatAttachment, OopzChatImage, OopzChatMessage, OopzChatReference, OopzPersonInfo,
+  OopzUploadedChatImage, OopzVoiceChannel
 } from '../oopz/OopzSession';
 import { rsaEncryptPassword, rsaSignBase64 } from '../oopz/OopzCrypto';
 import { ensureOopzEmojiFont, OOPZ_EMOJI_FONT_FAMILY } from '../oopz/OopzEmojiFont';
@@ -21,7 +23,11 @@ import { AccountPanel } from '../components/AccountPanel';
 import { AreaAdminPanel, canOpenAreaAdmin } from '../components/AreaAdminPanel';
 import { BottomBar, BOTTOM_BAR_INSET } from '../components/BottomBar';
 import { ChatEmojiPicker } from '../components/ChatEmojiPicker';
-import { ChatMessageItem, ChatMessageRow, ChatRecallOverlay, ChatTextRun } from '../components/ChatMessageRow';
+import {
+  chatMessageExcerpt, ChatMessageActions, ChatMessageItem, ChatMessageRow, ChatReferenceStrip, ChatReferenceView,
+  ChatTextRun
+} from '../components/ChatMessageRow';
+import { ChatImageDraft, discardChatImage, pickChatImage } from '../components/ChatImagePicker';
 import { ChatImagePreview } from '../components/ChatImagePreview';
 import { VoiceGainSlider } from '../components/VoiceGainSlider';
 import { VoiceOutputPicker } from '../components/VoiceDevices';
@@ -55,6 +61,13 @@ type MobilePane = 'channels' | 'room' | 'account';
 interface ChatAnchor {
   key: string;
   y: number;
+}
+
+interface ChatSendAttempt {
+  text: string;
+  referenceId: string;
+  imagePath: string;
+  clientMessageId: string;
 }
 
 interface ChannelMemberPreview {
@@ -329,7 +342,14 @@ struct NativeVoice {
   @State private roomMembers: RoomMemberModel[] = [];
   @State private chatMessages: ChatMessageItem[] = [];
   @State private chatInput: string = '';
-  @State private recallItem?: ChatMessageItem = undefined;
+  @State private chatReply?: OopzChatReference = undefined;
+  @State private chatImage?: ChatImageDraft = undefined;
+  private chatImagePayload?: OopzChatImage;
+  @State private pickingChatImage: boolean = false;
+  @State private actionItem?: ChatMessageItem = undefined;
+  private chatComposerVersion: number = 0;
+  private uploadedChatImage?: OopzUploadedChatImage;
+  private chatSendAttempt?: ChatSendAttempt;
   @State private previewImage?: OopzChatAttachment = undefined;
   @State private recallConfirming: boolean = false;
   @State private recallBusy: boolean = false;
@@ -450,6 +470,12 @@ struct NativeVoice {
     });
     this.store.setChatListener((channelId: string, change: string, messageId?: string) => {
       if (channelId === this.selectedChannelId) {
+        if (change === 'recall' && this.chatReply && this.chatReply.messageId === messageId) {
+          this.chatReply = {
+            messageId: this.chatReply.messageId, senderUid: this.chatReply.senderUid,
+            content: '', attachments: [], recalled: true
+          };
+        }
         if (this.hasChatAction()) {
           if (change === 'recall' && messageId === this.actionMessageId) this.closeChatAction();
           return;
@@ -487,6 +513,7 @@ struct NativeVoice {
 
   aboutToDisappear(): void {
     this.closeChatAction(false);
+    this.resetChatAttachments();
     this.restoreDesktopCaption();
     this.activePage = false;
     this.store.setGripInteractionActive('voice-input-menu', false);
@@ -988,29 +1015,118 @@ struct NativeVoice {
     }
   }
 
+  private clearChatImage(): void {
+    const previous = this.chatImage;
+    this.chatImage = undefined;
+    this.chatImagePayload = undefined;
+    this.uploadedChatImage = undefined;
+    discardChatImage(previous);
+  }
+
+  private resetChatAttachments(): void {
+    this.chatComposerVersion++;
+    this.chatReply = undefined;
+    this.chatSendAttempt = undefined;
+    this.clearChatImage();
+  }
+
+  private async chooseChatImage(): Promise<void> {
+    const context = this.getAbilityContext();
+    const cred = this.store.session.getCred();
+    if (context === undefined || !cred || this.pickingChatImage || this.sendingChat ||
+      this.selectedChannelObj?.type !== 'TEXT' || this.hasChatAction()) return;
+    const version = this.chatComposerVersion;
+    this.pickingChatImage = true;
+    try {
+      const selected = await pickChatImage(context, this.isPc);
+      if (!selected) return;
+      if (!this.activePage || version !== this.chatComposerVersion || this.store.session.getCred() !== cred) {
+        discardChatImage(selected.preview);
+        return;
+      }
+      this.clearChatImage();
+      this.chatImagePayload = selected.image;
+      this.chatImage = selected.preview;
+      this.notice = '';
+    } catch (error) {
+      if (version === this.chatComposerVersion && this.activePage && this.store.session.getCred() === cred) {
+        const reason = (error as Error).message;
+        this.notice = reason ? '无法选用图片：' + reason : '无法选用图片，请重试';
+      }
+    } finally {
+      this.pickingChatImage = false;
+    }
+  }
+
   private async sendChatMessage(): Promise<void> {
     const ch = this.selectedChannelObj;
     const areaId = this.selectedAreaId;
-    const text = this.chatInput.trim();
-    if (this.sendingChat || text.length === 0 || areaId.length === 0 || ch === undefined || ch.type !== 'TEXT') {
+    const cred = this.store.session.getCred();
+    const draft = this.chatInput;
+    const text = draft.trim();
+    const image = this.chatImage;
+    const payload = this.chatImagePayload;
+    const reference = this.chatReply;
+    if (this.sendingChat || this.pickingChatImage || this.hasChatAction() || (!text && !payload) ||
+      !cred || !areaId || ch?.type !== 'TEXT') {
       return;
     }
+    if (reference && this.store.isChatMessageRecalled(ch.channelId, reference.messageId)) {
+      this.notice = '引用的消息已撤回，请取消引用后再发送';
+      return;
+    }
+    const version = this.chatComposerVersion;
+    const referenceId = reference?.messageId ?? '';
+    const imagePath = image?.path ?? '';
+    const previousAttempt = this.chatSendAttempt;
+    const sameAttempt = previousAttempt?.text === text && previousAttempt.referenceId === referenceId &&
+      previousAttempt.imagePath === imagePath;
+    const clientMessageId = sameAttempt ? previousAttempt.clientMessageId : newChatClientMessageId();
+    this.chatSendAttempt = { text: text, referenceId: referenceId, imagePath: imagePath, clientMessageId: clientMessageId };
     this.sendingChat = true;
-    const draft = this.chatInput;
     const interaction = this.chatInteraction;
     this.notice = '';
     try {
-      await this.store.sendChannelMessage(areaId, ch.channelId, text);
-      if (this.selectedAreaId !== areaId || this.selectedChannelId !== ch.channelId) return;
+      let attachment = this.uploadedChatImage;
+      if (image && payload && !attachment) {
+        attachment = await this.store.session.uploadChatImage(payload);
+        if (version === this.chatComposerVersion && image.path === this.chatImage?.path) {
+          this.uploadedChatImage = attachment;
+        }
+      }
+      if (this.store.session.getCred() !== cred) return;
+      await this.store.sendChannelMessage(areaId, ch.channelId, text, {
+        clientMessageId: clientMessageId,
+        reference: reference,
+        image: attachment
+      });
+      if (version !== this.chatComposerVersion || this.store.session.getCred() !== cred || !this.activePage) return;
       if (this.chatInput === draft) this.chatInput = '';
+      if (this.chatReply?.messageId === referenceId) this.chatReply = undefined;
+      if (image && this.chatImage?.path === imagePath) this.clearChatImage();
+      this.chatSendAttempt = undefined;
       this.syncChatMessages(interaction === this.chatInteraction);
     } catch (error) {
-      if (this.selectedAreaId === areaId && this.selectedChannelId === ch.channelId) {
-        this.notice = (error as Error).message;
+      if (version === this.chatComposerVersion && this.store.session.getCred() === cred && this.activePage) {
+        this.notice = (error as Error).message || '消息发送失败，请重试';
       }
     } finally {
       this.sendingChat = false;
     }
+  }
+
+  private chatReferenceView(referenceId: string, source?: OopzChatReference): ChatReferenceView {
+    if (source?.recalled || this.store.isChatMessageRecalled(this.selectedChannelId, referenceId)) {
+      return { author: '', excerpt: '引用的消息已撤回' };
+    }
+    if (source === undefined) return { author: '', excerpt: '引用消息暂不可见' };
+    const person = this.store.getPersonByUid(source.senderUid) ??
+      (this.store.session.getCred()?.personUid === source.senderUid ? this.store.selfProfile : undefined);
+    const text = cleanChatContent(source.content, source.attachments.length > 0);
+    return {
+      author: person?.name || source.senderUid.slice(0, 6) || '成员',
+      excerpt: chatMessageExcerpt(text, source.attachments).replace(/[\u{103200}-\u{10320f}]/gu, '[表情]')
+    };
   }
 
   private syncChatMessages(scrollToBottom: boolean = false): void {
@@ -1022,6 +1138,10 @@ struct NativeVoice {
     }
     const selfUid = this.store.session.getCred()?.personUid ?? '';
     const rawList: OopzChatMessage[] = this.store.messagesByChannel.get(chId) ?? [];
+    const messagesById = new Map<string, OopzChatMessage>();
+    for (const message of rawList) {
+      if (message.messageId) messagesById.set(message.messageId, message);
+    }
     const items: ChatMessageItem[] = [];
     for (let i = 0; i < rawList.length; i++) {
       const m = rawList[i];
@@ -1031,6 +1151,9 @@ struct NativeVoice {
       const senderAvatar = person !== undefined ? person.avatar : '';
       const key = m.messageId.length > 0 ? m.messageId : (m.clientMessageId.length > 0 ? m.clientMessageId : `idx_${i}`);
       const cleanText = cleanChatContent(m.content, m.attachments.length > 0);
+      const referenceId = m.referenceMessageId;
+      const original = referenceId ? messagesById.get(referenceId) : undefined;
+      const source = original !== undefined && !m.reference?.recalled ? toChatReference(original) : m.reference;
       items.push({
         key: key,
         messageId: m.messageId,
@@ -1041,7 +1164,8 @@ struct NativeVoice {
         timeText: formatChatTime(m.timestampMs),
         cleanText: cleanText,
         textRuns: splitOopzEmojiRuns(cleanText),
-        attachments: m.attachments
+        attachments: m.attachments,
+        reference: referenceId ? this.chatReferenceView(referenceId, source) : undefined
       });
     }
     this.chatMessages = items;
@@ -1071,7 +1195,7 @@ struct NativeVoice {
   }
 
   private hasChatAction(): boolean {
-    return this.recallItem !== undefined || this.previewImage !== undefined;
+    return this.actionItem !== undefined || this.previewImage !== undefined;
   }
 
   private beginChatAction(msg: ChatMessageItem): void {
@@ -1088,12 +1212,36 @@ struct NativeVoice {
     }
   }
 
-  private openRecallMenu(msg: ChatMessageItem, x: number, y: number): void {
-    if (this.hasChatAction() || !msg.messageId || !msg.isSelf) return;
+  private openMessageMenu(msg: ChatMessageItem, x: number, y: number): void {
+    if (this.hasChatAction() || !msg.messageId) return;
     this.beginChatAction(msg);
     this.menuX = x;
     this.menuY = y;
-    this.recallItem = msg;
+    this.actionItem = msg;
+  }
+
+  private chooseChatReply(): void {
+    const item = this.actionItem;
+    if (!item) return;
+    const original = this.store.messagesByChannel.get(this.selectedChannelId)?.find((msg: OopzChatMessage): boolean =>
+      msg.messageId === item.messageId);
+    if (original && this.actionSelfUid === this.store.session.getCred()?.personUid) {
+      this.chatReply = toChatReference(original);
+      this.closeChatAction(true, true);
+    } else {
+      this.closeChatAction();
+    }
+  }
+
+  private async copyChatMessage(): Promise<void> {
+    const text = this.actionItem?.cleanText;
+    this.closeChatAction();
+    if (!text) return;
+    try {
+      await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text));
+    } catch {
+      this.getUIContext().getPromptAction().showToast({ message: '复制失败，请重试' });
+    }
   }
 
   private openChatImage(msg: ChatMessageItem, image: OopzChatAttachment): void {
@@ -1102,12 +1250,12 @@ struct NativeVoice {
     this.previewImage = image;
   }
 
-  private closeChatAction(restore: boolean = true): void {
+  private closeChatAction(restore: boolean = true, focusComposer: boolean = false): void {
     const interaction = ++this.chatInteraction;
     if (!this.hasChatAction()) return;
     const channelId = this.actionChannel;
     const sourceKey = this.actionSourceKey;
-    this.recallItem = undefined;
+    this.actionItem = undefined;
     this.recallConfirming = false;
     this.recallBusy = false;
     this.previewImage = undefined;
@@ -1131,16 +1279,20 @@ struct NativeVoice {
         }
       }
       if (this.isPc) {
-        const index = this.chatMessages.findIndex((m: ChatMessageItem): boolean => m.key === sourceKey);
-        const key = index >= 0 && this.chatScroller.getItemRect(index).height > 0 ? sourceKey : anchor?.key;
-        if (key) focusControl.requestFocus('chat-message-' + key);
+        if (focusComposer) {
+          focusControl.requestFocus('chat-composer-input');
+        } else {
+          const index = this.chatMessages.findIndex((m: ChatMessageItem): boolean => m.key === sourceKey);
+          const key = index >= 0 && this.chatScroller.getItemRect(index).height > 0 ? sourceKey : anchor?.key;
+          if (key) focusControl.requestFocus('chat-message-' + key);
+        }
       }
     }, 32);
   }
 
   private async submitChatRecall(): Promise<void> {
-    const msg = this.recallItem;
-    if (!msg || !this.recallConfirming || this.recallBusy) return;
+    const msg = this.actionItem;
+    if (!msg?.isSelf || !this.recallConfirming || this.recallBusy) return;
     if (this.actionSelfUid !== this.store.session.getCred()?.personUid || this.actionArea !== this.selectedAreaId ||
       this.actionChannel !== this.selectedChannelId) {
       this.closeChatAction(false);
@@ -1222,6 +1374,7 @@ struct NativeVoice {
     const channels = this.store.channelsByArea.get(this.selectedAreaId) ?? [];
     this.selectedChannelObj = channels.find((c: OopzVoiceChannel): boolean => c.channelId === this.selectedChannelId);
     if (previousChannel !== this.selectedChannelObj?.channelId) {
+      this.resetChatAttachments();
       this.chatInteraction++;
       this.chatLoadVersion++;
       this.loadingChat = false;
@@ -2767,8 +2920,7 @@ struct NativeVoice {
               ListItem() {
                 ChatMessageRow({
                   item: msg, isDark: this.isDark, oopzEmojiFontReady: this.oopzEmojiFontReady, isDesktop: this.isPc,
-                  canRecall: msg.isSelf && msg.messageId.length > 0,
-                  onRecallMenu: (item: ChatMessageItem, x: number, y: number) => { this.openRecallMenu(item, x, y); },
+                  onMessageMenu: (item: ChatMessageItem, x: number, y: number) => { this.openMessageMenu(item, x, y); },
                   onPreview: (image: OopzChatAttachment) => { this.openChatImage(msg, image); }
                 })
               }
@@ -2806,11 +2958,44 @@ struct NativeVoice {
         Text(this.notice).fontSize(12).fontColor(getTheme(this.isDark).warn)
       }
 
+      if (this.chatReply !== undefined) {
+        ChatReferenceStrip({
+          reference: this.chatReferenceView(this.chatReply.messageId, this.chatReply),
+          isDark: this.isDark, inComposer: true, canRemove: !this.sendingChat,
+          onRemove: () => { this.chatReply = undefined; this.notice = ''; }
+        })
+      }
+      if (this.chatImage !== undefined) {
+        Row({ space: 10 }) {
+          Image(this.chatImage.previewUri).width(46).height(46).borderRadius(6)
+            .objectFit(ImageFit.Contain).draggable(false).accessibilityText('待发送图片预览')
+          Text(this.chatImage.name).layoutWeight(1).fontSize(13).maxLines(1)
+            .fontColor(getTheme(this.isDark).text).textOverflow({ overflow: TextOverflow.Ellipsis })
+          Button('×').width(34).height(34).fontSize(18).backgroundColor(Color.Transparent)
+            .fontColor(getTheme(this.isDark).textSecondary).accessibilityText('移除图片')
+            .enabled(!this.sendingChat).onClick(() => { this.clearChatImage(); this.notice = ''; })
+        }.width('100%').padding(6).borderRadius(8).backgroundColor(getTheme(this.isDark).surfaceAlt)
+      }
+
       Row({ space: 8 }) {
+        Button({ type: ButtonType.Normal }) {
+          if (this.pickingChatImage) {
+            LoadingProgress().width(20).height(20).color(getTheme(this.isDark).accent)
+          } else {
+            SymbolGlyph($r('sys.symbol.picture')).fontSize(21).fontColor([getTheme(this.isDark).text])
+          }
+        }
+        .width(46).height(42).padding(0).borderRadius(12)
+        .backgroundColor(getTheme(this.isDark).surfaceAlt)
+        .accessibilityText(this.pickingChatImage ? '正在选择图片' : '选择图片')
+        .enabled(!this.sendingChat && !this.pickingChatImage)
+        .onClick(() => { this.chooseChatImage(); })
+
         TextInput({
           placeholder: `发消息到 #${this.selectedChannelObj?.name ?? '频道'}`,
           text: this.chatInput
         })
+          .id('chat-composer-input')
           .layoutWeight(1)
           .height(42)
           .borderRadius(14)
@@ -2835,15 +3020,20 @@ struct NativeVoice {
           }
         })
 
-        Button(this.sendingChat ? '发送中' : '发送')
-          .height(42)
-          .padding({ left: 16, right: 16 })
-          .borderRadius(14)
-          .backgroundColor(getTheme(this.isDark).accent)
-          .fontColor(getTheme(this.isDark).accentText)
-          .fontWeight(FontWeight.Medium)
-          .enabled(!this.sendingChat && this.chatInput.trim().length > 0)
-          .onClick(() => { this.sendChatMessage(); })
+        Button({ type: ButtonType.Normal }) {
+          if (this.sendingChat) {
+            LoadingProgress().width(20).height(20).color(getTheme(this.isDark).accentText)
+          } else {
+            SymbolGlyph($r('sys.symbol.paperplane_fill')).fontSize(21)
+              .fontColor([getTheme(this.isDark).accentText])
+          }
+        }
+        .width(60).height(42).padding(0).borderRadius(14)
+        .backgroundColor(getTheme(this.isDark).accent)
+        .accessibilityText(this.sendingChat ? '正在发送' : '发送消息')
+        .enabled(!this.sendingChat && !this.pickingChatImage &&
+          (this.chatInput.trim().length > 0 || this.chatImage !== undefined))
+        .onClick(() => { this.sendChatMessage(); })
       }
       .width('100%')
       .padding(8)
@@ -3286,11 +3476,13 @@ struct NativeVoice {
           imageUrl: this.previewImage.url, imageName: this.previewImage.displayName || '图片',
           isDesktop: this.isPc, onClose: () => { this.closeChatAction(); }
         })
-      } else if (this.recallItem !== undefined) {
-        ChatRecallOverlay({
-          item: this.recallItem, isDark: this.isDark, isDesktop: this.isPc,
+      } else if (this.actionItem !== undefined) {
+        ChatMessageActions({
+          item: this.actionItem, isDark: this.isDark, isDesktop: this.isPc,
           windowX: this.menuX, windowY: this.menuY, confirming: this.recallConfirming, busy: this.recallBusy,
           onDismiss: () => { this.closeChatAction(); },
+          onReply: () => { this.chooseChatReply(); },
+          onCopy: () => { this.copyChatMessage(); },
           onChooseRecall: () => { this.recallConfirming = true; },
           onSubmit: () => { this.submitChatRecall(); }
         })

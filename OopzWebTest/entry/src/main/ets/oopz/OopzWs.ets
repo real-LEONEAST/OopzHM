@@ -7,8 +7,8 @@ import { webSocket } from '@kit.NetworkKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { OOPZ_APP_VERSION_NUMBER, OOPZ_PLATFORM } from './OopzKeyMaterial';
 import { inflateZlib } from './Inflate';
-import { normalizeChatText } from './OopzChatText';
-import type { OopzChatAttachment, OopzChatMessage, OopzCred } from './OopzSession';
+import { parseChatMessageRaw } from './OopzSession';
+import type { ChatMessageRaw, OopzChatMessage, OopzCred } from './OopzSession';
 
 const TAG: string = 'OopzWs';
 const WS_URL: string = 'wss://ws.oopz.cn';
@@ -113,34 +113,8 @@ interface WsVoiceBody {
   activeNum?: number;
 }
 
-interface WsChatAttachmentRaw {
-  attachmentType?: string;
-  url?: string;
-  fileKey?: string;
-  width?: number;
-  height?: number;
-  displayName?: string;
-}
-
-interface WsChatMsgRaw {
-  messageId?: string | number;
-  id?: string | number;
-  clientMessageId?: string;
-  area?: string;
-  areaId?: string;
-  channel?: string;
-  channelId?: string;
-  person?: string | number;
-  senderUid?: string | number;
-  senderId?: string | number;
-  content?: string;
-  text?: string;
-  timestamp?: string | number;
-  attachments?: WsChatAttachmentRaw[];
-}
-
 interface WsMessageEnvelopeBody {
-  data?: string | WsChatMsgRaw;
+  data?: string | ChatMessageRaw;
 }
 
 interface WsRecallBody {
@@ -174,19 +148,6 @@ function asWsStr(value: string | number | undefined | null): string {
     return String(value as number);
   }
   return '';
-}
-
-function parseWsTsMs(raw: string | number | undefined): number {
-  if (typeof raw === 'number') {
-    return raw > 1e14 ? Math.floor(raw / 1000) : raw;
-  }
-  if (typeof raw === 'string' && raw.length > 0) {
-    const n = Number(raw);
-    if (!isNaN(n) && n > 0) {
-      return n > 1e14 ? Math.floor(n / 1000) : n;
-    }
-  }
-  return Date.now();
 }
 
 function decodeWsPayload(value: string | ArrayBuffer): string {
@@ -509,51 +470,21 @@ export class OopzWsClient {
 
     if (event === 9) {
       const env = bodyObj as WsMessageEnvelopeBody;
-      let msgRaw: WsChatMsgRaw = bodyObj as WsChatMsgRaw;
+      let msgRaw = bodyObj as ChatMessageRaw;
       if (typeof env.data === 'string') {
         try {
-          msgRaw = JSON.parse(env.data as string) as WsChatMsgRaw;
+          const decoded = JSON.parse(env.data) as ChatMessageRaw | null;
+          if (decoded !== null) msgRaw = decoded;
         } catch {
-          msgRaw = bodyObj as WsChatMsgRaw;
+          // Older broadcasts may already have the message fields on the envelope.
         }
       } else if (env.data !== undefined && env.data !== null) {
-        msgRaw = env.data as WsChatMsgRaw;
+        msgRaw = env.data;
       }
-      const channelId = msgRaw.channel !== undefined ? msgRaw.channel : (msgRaw.channelId ?? '');
-      const areaId = msgRaw.area !== undefined ? msgRaw.area : (msgRaw.areaId ?? '');
-      const msgId = msgRaw.messageId !== undefined ? String(msgRaw.messageId)
-        : (msgRaw.id !== undefined ? String(msgRaw.id) : '');
-      const sender = msgRaw.person !== undefined ? String(msgRaw.person)
-        : (msgRaw.senderUid !== undefined ? String(msgRaw.senderUid)
-          : (msgRaw.senderId !== undefined ? String(msgRaw.senderId) : ''));
-      const content = normalizeChatText(msgRaw.content, msgRaw.text);
-      const attachments: OopzChatAttachment[] = [];
-      if (Array.isArray(msgRaw.attachments)) {
-        for (const att of msgRaw.attachments) {
-          const url = att.url ?? '';
-          if (url.length === 0) continue;
-          attachments.push({
-            attachmentType: att.attachmentType ?? 'IMAGE',
-            url: url,
-            fileKey: att.fileKey ?? '',
-            width: typeof att.width === 'number' ? att.width : 0,
-            height: typeof att.height === 'number' ? att.height : 0,
-            displayName: att.displayName ?? ''
-          });
-        }
-      }
-      if (channelId.length > 0 && (msgId.length > 0 || content.length > 0 || attachments.length > 0)) {
-        hilog.info(0x0, TAG, 'WS chat msg ch=%{public}s id=%{public}s', channelId, msgId);
-        this.callbacks.onChatMessage?.({
-          messageId: msgId,
-          clientMessageId: msgRaw.clientMessageId ?? '',
-          areaId: areaId,
-          channelId: channelId,
-          senderUid: sender,
-          content: content,
-          timestampMs: parseWsTsMs(msgRaw.timestamp),
-          attachments: attachments
-        });
+      const msg = parseChatMessageRaw(msgRaw);
+      if (msg.channelId && (msg.messageId || msg.content || msg.attachments.length > 0)) {
+        hilog.info(0x0, TAG, 'WS chat msg ch=%{public}s id=%{public}s', msg.channelId, msg.messageId);
+        this.callbacks.onChatMessage?.(msg);
       }
       return;
     }
