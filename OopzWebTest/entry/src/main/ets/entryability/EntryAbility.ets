@@ -126,6 +126,7 @@ export default class EntryAbility extends UIAbility {
       hilog.warn(0x0, LOG_TAG, 'Unable to observe the window stage, code=%{public}d', (error as BusinessError).code);
     }
     PcTrayManager.get().init(this.context, windowStage).catch(() => {});
+    AppStorage.setOrCreate<boolean>('oopzStartupCoverPending', this.page === 'pages/NativeVoice');
     windowStage.loadContent(this.page).then(() => {
       this.applyWindowTheme(AppStorage.get<boolean>('oopzIsDark') ?? true);
     }).catch((error: BusinessError) => {
