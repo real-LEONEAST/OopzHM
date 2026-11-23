@@ -98,8 +98,7 @@ export function md5Bytes(input: Uint8Array): Uint8Array {
   return out;
 }
 
-export function md5HexUtf8(text: string): string {
-  const bytes = new util.TextEncoder().encodeInto(text);
+export function md5Hex(bytes: Uint8Array): string {
   const digest = md5Bytes(bytes);
   let hex = '';
   for (let i = 0; i < digest.length; i++) {
@@ -107,4 +106,8 @@ export function md5HexUtf8(text: string): string {
     hex += (v < 16 ? '0' : '') + v.toString(16);
   }
   return hex;
+}
+
+export function md5HexUtf8(text: string): string {
+  return md5Hex(new util.TextEncoder().encodeInto(text));
 }
