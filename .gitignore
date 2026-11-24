@@ -22,5 +22,8 @@
 *.keystore
 *.jks
 *.pfx
+/harmonyos/build-profile.json5
+/harmonyos/entry/src/main/ets/oopz/OopzKeyMaterial.ets
+# Git 更新后仍可能留有改名前的本机文件
 /OopzWebTest/build-profile.json5
 /OopzWebTest/entry/src/main/ets/oopz/OopzKeyMaterial.ets

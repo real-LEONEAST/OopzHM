@@ -1,10 +1,10 @@
-# Oopz 语音测试
+# OopzHM 构建与联调
 
 这是一个个人调试用的鸿蒙应用，启动后直接进入原生 Oopz 选房。Node 负责 Oopz 会话和频道操作，鸿蒙用声网原生 SDK 收发语音。需要使用官方网页时，点 **Oopz 网页登录与通话**。
 
 ## 从 Git 新检出后准备构建
 
-在 `OopzWebTest` 目录用 PowerShell 准备本机配置，再用 DevEco Studio 同步依赖，或运行 `ohpm install --all`。
+在 `harmonyos` 目录用 PowerShell 准备本机配置，再用 DevEco Studio 同步依赖，或运行 `ohpm install --all`。
 
 ```powershell
 if (-not (Test-Path -LiteralPath 'build-profile.json5')) {
@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath 'entry/src/main/ets/oopz/OopzKeyMaterial.ets'))
 
 ## 安装到真机
 
-1. 用 DevEco Studio 打开 `OopzWebTest` 目录。工程使用 HarmonyOS SDK 26.0.0 构建，声明支持鸿蒙电脑、手机和平板，目标设备须支持 API 13 或更高版本。
+1. 用 DevEco Studio 打开 `harmonyos` 目录。工程使用 HarmonyOS SDK 26.0.0 构建，声明支持鸿蒙电脑、手机和平板，目标设备须支持 API 13 或更高版本。
 2. 在目标设备上启用开发者模式，通过无线调试或 USB 调试连到运行 DevEco Studio 的电脑。在 DevEco Studio 的设备列表中选中要测试的设备。
 3. 在 **File → Project Structure → Project → Signing Configs** 勾选自动签名，选择 HarmonyOS 支持。按 DevEco Studio 提示登录华为开发者账号并生成设备调试签名。
 4. 选择 `entry` 后点 **Run**。安装后的应用名为「Oopz 语音测试」。
@@ -57,7 +57,7 @@ node tools/oopz-room-bridge.mjs --auth-adapter 'D:\Test\oopz-evaluation-auth.mjs
 
 用获准接入 Oopz 的测试账号和该账号已加入的语音频道。Node 读取本地会话 JSON，字段为 `device_id`、`person_uid`、`jwt_token`、`private_key`，可选 `app_version`。上游 dsh-oopz-voice 的「语音房」登录流程在 `<DSH_HOME>/oopz-voice/cred.json` 生成这个格式的缓存，`DSH_HOME` 默认是用户目录下的 `.dsh`。会话文件放在工程外，启动时传路径。另一位测试者使用自己的账号从官方客户端进同一个频道对讲。 [上游登录实现](https://github.com/Kingyibin/dsh-oopz-voice/blob/5a77cf383793417309c62bf4e536deca1a0e0a97/tools/login.mjs#L215-L237)
 
-在 `OopzWebTest` 目录用 Node 20 或更新版本启动服务，把示例路径换成实际凭据文件的路径。
+在 `harmonyos` 目录用 Node 20 或更新版本启动服务，把示例路径换成实际凭据文件的路径。
 
 ```powershell
 npm ci --prefix tools --ignore-scripts
