@@ -1,6 +1,6 @@
 # OopzHM 开发协作规范
 
-本文件是 Codex、DeepSeek Harness、Antigravity 和人工开发共用的项目规则。在 `OopzHM` 根目录或分配给任务的工作树中开启开发会话。DevEco Studio 打开对应工作树内的 `OopzWebTest`。继续已有任务时，先查看该任务的分支、PR 和验证记录。
+本文件是 Codex、DeepSeek Harness、Antigravity 和人工开发共用的项目规则。在 `OopzHM` 根目录或分配给任务的工作树中开启开发会话。DevEco Studio 打开对应工作树内的 `harmonyos`。继续已有任务时，先查看该任务的分支、PR 和验证记录。
 
 ## 分支与工作树
 
@@ -42,14 +42,14 @@ PR 说明写明以下内容。
 
 ## 鸿蒙构建与产物
 
-按 [工程构建说明](OopzWebTest/README.md#构建与安装命令行) 准备环境和本机调试签名。当前工程使用 HarmonyOS SDK 26.0.0。每个工作树使用自身的构建输出和缓存，软件依赖按已提交的清单和锁文件恢复。
+按 [工程构建说明](harmonyos/README.md#构建与安装命令行) 准备环境和本机调试签名。当前工程使用 HarmonyOS SDK 26.0.0。每个工作树使用自身的构建输出和缓存，软件依赖按已提交的清单和锁文件恢复。
 
 在自己的工作树根目录运行以下命令。`DEVECO_SDK_HOME` 按工程说明指向 DevEco Studio 的 `sdk` 目录。
 
 ```powershell
 $oopzDevEco = Split-Path -Parent $env:DEVECO_SDK_HOME
 $oopzHvigor = Join-Path $oopzDevEco 'tools\hvigor\bin\hvigorw.bat'
-Push-Location -LiteralPath 'OopzWebTest'
+Push-Location -LiteralPath 'harmonyos'
 try {
     & $oopzHvigor --mode module -p product=default -p buildMode=debug assembleHap --no-daemon
     if ($LASTEXITCODE -ne 0) { throw 'default HAP 构建失败' }
@@ -58,12 +58,12 @@ try {
 }
 ```
 
-- 在 `OopzWebTest/entry/build/default/outputs/default/` 检查本次生成的 HAP。完成调试签名时，真机安装包为 `entry-default-signed.hap`。已存在的 HAP 只能证明之前的构建曾产出文件。
+- 在 `harmonyos/entry/build/default/outputs/default/` 检查本次生成的 HAP。完成调试签名时，真机安装包为 `entry-default-signed.hap`。已存在的 HAP 只能证明之前的构建曾产出文件。
 - 语音相关改动按影响范围验证登录、选域选频道、加入、多端对讲和退出。涉及后台或锁屏时，用支持该场景的真机验证。授权、签名或设备缺失时，在 PR 记录实际通过的检查和阻塞项。
 - 集成包从合并后的 `main` 提交构建，记录提交 SHA、产品和验证结果。HAP、安装包和本机缓存由构建或产物渠道管理。
 
 ## 首次建仓
 
 1. 先盘点现有未版本化的并行成果，确定共同基线。同意纳入基线的改动一起进入初始提交，待完成的任务记录范围后分别进入 `feat/` 分支。
-2. 纳入源码、资源、依赖锁文件和协作规范，检查暂存列表。本机 `OopzWebTest/build-profile.json5` 和 `OopzKeyMaterial.ets` 由 Git 忽略。各工作树按[首次检出说明](OopzWebTest/README.md#从-git-新检出后准备构建)使用 `build-profile.template.json5` 准备本机配置，独立配置调试签名，并通过获授权的渠道补齐语音测试材料。变更共享构建配置时同步更新模板，随 PR 一起评审。
+2. 纳入源码、资源、依赖锁文件和协作规范，检查暂存列表。本机 `harmonyos/build-profile.json5` 和 `OopzKeyMaterial.ets` 由 Git 忽略。各工作树按[首次检出说明](harmonyos/README.md#从-git-新检出后准备构建)使用 `build-profile.template.json5` 准备本机配置，独立配置调试签名，并通过获授权的渠道补齐语音测试材料。变更共享构建配置时同步更新模板，随 PR 一起评审。
 3. 在新工作树验证依赖恢复和 `default` 构建，随后把该基线接到共享远端的 `main`。各工具从同一个基线开始后续任务。仓库、远端及所需权限就绪后开始使用上述 PR 流程。
